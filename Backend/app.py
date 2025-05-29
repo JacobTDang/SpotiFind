@@ -1,21 +1,38 @@
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from routes import register_routes
 import os
-# iniitalize the app and db
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize extensions
 db = SQLAlchemy()
-app = Flask(__name__)
+migrate = Migrate()
 
-#TODO: set up POSTGRESS database for song vectors...
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-db.init_app(app)
+def create_app():
+    app = Flask(__name__)
     
-# register the routes
-register_routes(app, db)
+    # Configuration
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  
+    app.config['UPLOAD_FOLDER'] = 'temp_uploads'
+    
+    # Initialize extensions with app
+    db.init_app(app)
+    migrate.init_app(app, db)
 
-# registering migrate command
-migrate = Migrate(app, db)
+    # Register routes after app and db are initialized
+
+    from routes import bp
+    app.register_blueprint(bp)
+    
+    return app
+
+# Create the application instance
+app = create_app()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
