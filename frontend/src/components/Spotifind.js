@@ -8,6 +8,7 @@ import UploadTab from './UploadTab';
 import YouTubeTab from './YouTubeTab';
 import RecordingTab from './RecordingTab';
 import ResultsSection from './ResultsSection';
+import PlaylistTab from './PlaylistTab';
 
 const Spotifind = () => {
   const [activeTab, setActiveTab] = useState('upload');
@@ -300,6 +301,14 @@ const Spotifind = () => {
               stopRecording={stopRecording}
               clearRecording={clearRecording}
               handleAudioSearch={handleAudioSearch}
+            />
+          )}
+
+          {activate === 'playlist' && (
+            <PlaylistTab
+            isloading={isLoading}
+            setIsLoading={setIsLoading}
+            showMessages={showMessage}
             />
           )}
         </div>
