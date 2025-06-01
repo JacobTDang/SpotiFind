@@ -1,9 +1,10 @@
 from flask import Flask, request, jsonify, Blueprint
 import os
 import tempfile
-from audio_utils import get_embedding_from_file, save_song
+from audio_utils import get_embedding_from_file, save_song, load_youtube_playlist
 from models import Song, SongEmbedding, db
 import logging
+from datetime import datetime
 
 bp = Blueprint('main', __name__)
 
@@ -121,28 +122,86 @@ def query():
             'message': f'Upload failed: {e}'
         }), 500
 
-@bp.route('/youtube_playlist')
-def upload():
-  # validate teh json response
-  playlist_url = request.get_json('url')
 
-  if data None:
-    return jsonify({
-      'success': False,
-      'message': 'playlist unable to upload'
-    })
-  # add playlist to temp files
-  try:
-    response = load_youtube_track(playlist_url)
+@bp.route('/youtube-playlist', methods=['POST'])
+def upload_playlist():
+    """
+    Process YouTube playlist and add all videos to database.
+    Expects JSON: {"url": "playlist_url", "max_videos": 50}
+    """
+    try:
+        # Validate JSON payload
+        data = request.get_json()
 
-    return jsonify({
-      'success': True,
-      'message': f'Playlist upload sucessful{response}'
-    })
+        if not data or 'url' not in data:
+            return jsonify({
+                'success': False,
+                'message': 'Playlist URL is required'
+            }), 400
 
-  catch Exception as e:
-    return jsonify({
-      'success': False,
-      'message': f'uploading playlist error {e}'
-    })
+        playlist_url = data['url'].strip()
+        max_videos = data.get('max_videos', 50)  # Default to 50
+
+        # Validate inputs
+        if not playlist_url:
+            return jsonify({
+                'success': False,
+                'message': 'Playlist URL cannot be empty'
+            }), 400
+
+        # Basic URL validation
+        if not any(x in playlist_url for x in ['playlist', 'youtube.com', 'youtu.be']):
+            return jsonify({
+                'success': False,
+                'message': 'Invalid YouTube playlist URL format'
+            }), 400
+
+        # Validate max_videos range
+        if not isinstance(max_videos, int) or max_videos < 1 or max_videos > 100:
+            max_videos = 50  # Reset to default if invalid
+
+        logger.info(f"Processing playlist: {playlist_url} (max: {max_videos})")
+
+        # Process the playlist
+        response = load_youtube_playlist(playlist_url, max_videos)
+
+        # Separate successful and failed results
+        successful = [r for r in response if r.get('success', False)]
+        failed = [r for r in response if not r.get('success', False)]
+
+        total_videos = len(response)
+        successful_count = len(successful)
+        failed_count = len(failed)
+
+        logger.info(f"Playlist results: {successful_count}/{total_videos} successful")
+
+        return jsonify({
+            'success': True,
+            'message': f'Processed {successful_count}/{total_videos} videos',
+            'total_videos': total_videos,
+            'successful_count': successful_count,
+            'failed_count': failed_count,
+            'successful_songs': successful,
+            'failed_songs': failed,
+            'summary': {
+                'playlist_url': playlist_url,
+                'max_videos_requested': max_videos,
+                'processed_at': datetime.utcnow().isoformat()
+            }
+        })
+
+    except KeyError as e:
+        logger.error(f"Missing required field: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Missing required field: {str(e)}'
+        }), 400
+
+    except Exception as e:
+        logger.error(f"Playlist processing error: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Playlist processing error: {str(e)}'
+        }), 500
+
 
