@@ -121,5 +121,28 @@ def query():
             'message': f'Upload failed: {e}'
         }), 500
 
+@bp.route('/youtube_playlist')
+def upload():
+  # validate teh json response
+  playlist_url = request.get_json('url')
 
+  if data None:
+    return jsonify({
+      'success': False,
+      'message': 'playlist unable to upload'
+    })
+  # add playlist to temp files
+  try:
+    response = load_youtube_track(playlist_url)
+
+    return jsonify({
+      'success': True,
+      'message': f'Playlist upload sucessful{response}'
+    })
+
+  catch Exception as e:
+    return jsonify({
+      'success': False,
+      'message': f'uploading playlist error {e}'
+    })
 
