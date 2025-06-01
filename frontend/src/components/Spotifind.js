@@ -25,6 +25,10 @@ const Spotifind = () => {
   // YouTube form state
   const [youtubeUrl, setYoutubeUrl] = useState('');
 
+  // 🔧 FIXED: Added missing playlist state
+  const [playlistUrl, setPlaylistUrl] = useState('');
+  const [playlistResults, setPlaylistResults] = useState(null);
+
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -34,16 +38,21 @@ const Spotifind = () => {
   // Refs for audio recording
   const recordingInterval = useRef(null);
   const audioChunks = useRef([]);
-  // test flask end point to check if cors connection works
+
+  // Base flask URL
+  const FLASK_URL = 'http://localhost:5000';
+
+  // Test flask endpoint to check if cors connection works
   const testConnection = async () => {
-      try {
-        const response = await fetch('http://localhost:5000/test');
-        const data = await response.json();
-        console.log('Connection test:', data);
-      } catch (error) {
-        console.error('Connection failed:', error);
-      }
-    };
+    try {
+      const response = await fetch('http://localhost:5000/test');
+      const data = await response.json();
+      console.log('Connection test:', data);
+    } catch (error) {
+      console.error('Connection failed:', error);
+    }
+  };
+
   // Cleanup recording interval
   useEffect(() => {
     return () => {
@@ -52,12 +61,11 @@ const Spotifind = () => {
       }
     };
   }, []);
-// Test connection when component mounts
+
+  // Test connection when component mounts
   useEffect(() => {
     testConnection();
   }, []);
-  // Base flask URL
-  const FLASK_URL = 'http://localhost:5000';
 
   const showMessage = (text, type) => {
     setMessage(text);
@@ -76,7 +84,6 @@ const Spotifind = () => {
     formData.append('file', uploadFile);
     formData.append('title', uploadTitle);
     formData.append('artist', uploadArtist);
-    // Add this to test connection
 
     try {
       const response = await fetch(`${FLASK_URL}/upload`, {
@@ -128,6 +135,54 @@ const Spotifind = () => {
       }
     } catch (error) {
       showMessage('Network error during YouTube processing', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 🔧 FIXED: Playlist handler with proper error handling
+  const handlePlaylistAdd = async () => {
+    if (!playlistUrl) {
+      showMessage('Please enter a Youtube playlist URL', 'error');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${FLASK_URL}/youtube-playlist`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: playlistUrl,
+          max_videos: 50
+        })
+      });
+
+      const data = await response.json();
+      console.log('🎵 Playlist response:', data);
+
+      if (data.success) {
+        console.log(`Total videos: ${data.total_videos}`);
+        console.log(`Successful: ${data.successful_count}`);
+        console.log(`Failed: ${data.failed_count}`);
+        console.log('Successful songs:', data.successful_songs);
+        console.log('Failed songs:', data.failed_songs);
+
+        showMessage(
+          `Playlist processed! ${data.successful_count}/${data.total_videos} songs added`,
+          'success'
+        );
+
+        setPlaylistResults(data);
+        setPlaylistUrl(''); // Clear the input
+      } else {
+        showMessage(data.message || 'Failed to process playlist', 'error');
+      }
+    } catch (error) {
+      console.error('Playlist error:', error);
+      showMessage('Network error during playlist processing', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -304,11 +359,16 @@ const Spotifind = () => {
             />
           )}
 
-          {activate === 'playlist' && (
+          {/* 🔧 FIXED: Corrected typos and added proper props */}
+          {activeTab === 'playlist' && (
             <PlaylistTab
-            isloading={isLoading}
-            setIsLoading={setIsLoading}
-            showMessages={showMessage}
+              isLoading={isLoading}
+              setIsLoading={setIsLoading}
+              showMessage={showMessage}
+              playlistUrl={playlistUrl}
+              setPlaylistUrl={setPlaylistUrl}
+              handlePlaylistAdd={handlePlaylistAdd}
+              playlistResults={playlistResults}
             />
           )}
         </div>
