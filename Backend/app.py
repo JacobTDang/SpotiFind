@@ -1,6 +1,6 @@
 from flask import Flask
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
+from database import db
 from flask_migrate import Migrate
 import os
 from dotenv import load_dotenv
@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize extensions
-db = SQLAlchemy()
 migrate = Migrate()
 
 def create_app():
@@ -26,7 +25,10 @@ def create_app():
     migrate.init_app(app, db)
 
     # Register routes after app and db are initialized
-    CORS(app, origins=[os.getenv('FRONTEND_DEV_SERVER_URL')])
+    CORS(app,
+      origins=[os.getenv('FRONTEND_DEV_SERVER_URL')],
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization'])
 
     from routes import bp
     app.register_blueprint(bp)

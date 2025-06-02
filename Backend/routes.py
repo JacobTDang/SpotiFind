@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify, Blueprint
 import os
 import tempfile
-from audio_utils import get_embedding_from_file, save_song, load_youtube_playlist
 from models import Song, SongEmbedding, db
 import logging
 from datetime import datetime
+from audio_utils import load_youtube_track, get_embedding_from_file, save_song, load_youtube_playlist,find_similar_songs
+from database import db
 
 bp = Blueprint('main', __name__)
 
@@ -14,24 +15,20 @@ logger = logging.getLogger(__name__)
 
 @bp.route('/')
 def index():
-    # will return JSON, but just setting up template to use in the future
     return jsonify({
         'message': "Hello from Jacob :))))))"
     })
 
 @bp.route('/test')
 def testCORS():
-  return jsonify({
-    'message': 'CORS is working if you see this',
-    'status': "success"
-  })
-
+    return jsonify({
+        'message': 'CORS is working if you see this',
+        'status': "success"
+    })
 
 @bp.route('/upload', methods=["GET", "POST"])
-def query():
-    """
-    upload song from local device
-    """
+def upload():
+    """Upload song from local device"""
     try:
         # check if file was in the request
         if 'file' not in request.files:
@@ -76,9 +73,9 @@ def query():
                 preview_url=None
             )
 
-            save_song(track)  # use "track", not the undefined "song"
+            save_song(track)
 
-            # TODO: Currently don’t have save embedding method, build later
+            # Save embedding
             song_embedding = SongEmbedding(
                 songID=track.songID,
                 audioStart=0.0,
@@ -101,9 +98,10 @@ def query():
         except Exception as processing_error:
             # roll back if there is error
             db.session.rollback()
+            logger.error(f"Error processing audio: {processing_error}")
             return jsonify({
                 'success': False,
-                'message': f'Error processing audio: {processing_error}'
+                'message': f'Error processing audio: {str(processing_error)}'
             }), 500
 
         finally:
@@ -117,18 +115,53 @@ def query():
                     pass
 
     except Exception as e:
+        logger.error(f"Upload error: {e}")
         return jsonify({
             'success': False,
-            'message': f'Upload failed: {e}'
+            'message': f'Upload failed: {str(e)}'
         }), 500
 
+@bp.route('/youtube', methods=['POST'])
+def youtube():
+    """Add a YouTube track to the database"""
+    try:
+        data = request.get_json()
+
+        if not data or 'url' not in data:
+            return jsonify({
+                'success': False,
+                'message': 'YouTube URL is required'
+            }), 400
+
+        url = data['url'].strip()
+
+        # Basic validation
+        if not url or 'youtube.com' not in url and 'youtu.be' not in url:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid YouTube URL'
+            }), 400
+
+        logger.info(f"Processing YouTube URL: {url}")
+
+        # Process the YouTube track
+        result = load_youtube_track(url)
+
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        logger.error(f"YouTube processing error: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Error processing YouTube video: {str(e)}'
+        }), 500
 
 @bp.route('/youtube-playlist', methods=['POST'])
 def upload_playlist():
-    """
-    Process YouTube playlist and add all videos to database.
-    Expects JSON: {"url": "playlist_url", "max_videos": 50}
-    """
+    """Process YouTube playlist and add all videos to database."""
     try:
         # Validate JSON payload
         data = request.get_json()
@@ -204,4 +237,55 @@ def upload_playlist():
             'message': f'Playlist processing error: {str(e)}'
         }), 500
 
+@bp.route('/search-audio', methods=['POST'])
+def search_audio():
+    """Search for similar songs using audio recording"""
+    try:
+        if 'audio' not in request.files:
+            return jsonify({
+                'success': False,
+                'message': 'No audio file provided'
+            }), 400
 
+        audio_file = request.files['audio']
+
+        # Save temp file
+        temp_dir = os.path.join(os.path.dirname(__file__), 'temp_uploads')
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_path = os.path.join(temp_dir, f"recording_{datetime.now().timestamp()}.webm")
+        audio_file.save(temp_path)
+
+        try:
+            # Generate embedding from recording
+            embedding, duration = get_embedding_from_file(temp_path)
+
+            # Find similar songs
+            similar_songs = find_similar_songs(embedding, limit=5)
+
+            if similar_songs:
+                return jsonify({
+                    'success': True,
+                    'similar_songs': similar_songs,
+                    'recording_duration': duration
+                }), 200
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'No similar songs found',
+                    'similar_songs': []
+                }), 200
+
+        finally:
+            # Cleanup
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Search audio error: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Error processing audio: {str(e)}'
+        }), 500

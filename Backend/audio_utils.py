@@ -3,12 +3,12 @@ import tempfile
 import logging
 from typing import Dict, Optional, List
 from dotenv import load_dotenv
-from models import Song, SongEmbedding, db
 import openl3
 import soundfile as sf
 import numpy as np
 import yt_dlp as yt
 import subprocess
+from models import Song, SongEmbedding, db
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +52,7 @@ YDL_AUDIO_OPTS = {
 
 def load_youtube_track(video_url: str) -> Dict:
     """Fetch metadata, save Song, download + embed, commit to DB."""
+
     temp_audio = None
 
     try:
@@ -151,7 +152,7 @@ def load_youtube_track(video_url: str) -> Dict:
             except OSError as e:
                 logger.warning(f"Failed to cleanup temp file {temp_audio}: {e}")
 
-def save_song(song: Song) -> None:
+def save_song(song) -> None:
     """Add song to session and flush to get songID."""
     db.session.add(song)
     db.session.flush()
@@ -331,7 +332,7 @@ def load_youtube_playlist(playlist_url: str, max_videos: int = 50) -> List[Dict]
             processed += 1
 
             # Log progress
-            status = "" if result['success'] else ""
+            status = "✓" if result['success'] else "✗"
             print(f"{status} {result['message']}: {result['song']}")
 
         logger.info(f"Playlist processing complete. {sum(1 for r in results if r['success'])}/{len(results)} successful")

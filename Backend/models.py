@@ -3,15 +3,15 @@ from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
+from database import db
 
-db = SQLAlchemy()
 class Song(db.Model):
     __tablename__ = 'songs'
 
     songID = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     artist = Column(String(255), nullable=False)
-    source = Column(String(50), default='local')  # 'local' or 'spotify'
+    source = Column(String(50), default='local')
     youtube_id  = Column(String(255), nullable=True)
     preview_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
