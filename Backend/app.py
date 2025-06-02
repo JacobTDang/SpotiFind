@@ -1,6 +1,5 @@
 from flask import Flask
 from flask_cors import CORS
-from database import db
 from flask_migrate import Migrate
 import os
 from dotenv import load_dotenv
@@ -8,8 +7,6 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Initialize extensions
-migrate = Migrate()
 
 def create_app():
     app = Flask(__name__)
@@ -21,8 +18,8 @@ def create_app():
     app.config['UPLOAD_FOLDER'] = 'temp_uploads'
 
     # Initialize extensions with app
-    db.init_app(app)
-    migrate.init_app(app, db)
+    from database import init_db
+    init_db(app)
 
     # Register routes after app and db are initialized
     CORS(app,

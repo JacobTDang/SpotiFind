@@ -16,7 +16,7 @@ class Song(db.Model):
     preview_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationship
+    # Relationship with cascade delete
     embeddings = relationship('SongEmbedding', back_populates='song', cascade='all, delete-orphan')
 
     def to_dict(self):
@@ -25,7 +25,8 @@ class Song(db.Model):
             'title': self.title,
             'artist': self.artist,
             'source': self.source,
-            'youtube_id ': self.youtube_id ,
+            'youtube_id': self.youtube_id ,
+            'preview_url': self.preview_url,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 

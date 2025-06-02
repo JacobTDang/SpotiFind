@@ -3,12 +3,17 @@ import tempfile
 import logging
 from typing import Dict, Optional, List
 from dotenv import load_dotenv
+
+# Import db from the neutral database module
+from database import db
+from models import Song, SongEmbedding
+
 import openl3
 import soundfile as sf
 import numpy as np
 import yt_dlp as yt
 import subprocess
-from models import Song, SongEmbedding, db
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)

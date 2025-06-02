@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify, Blueprint
 import os
 import tempfile
-from models import Song, SongEmbedding, db
+from models import Song, SongEmbedding
+from database import db
 import logging
 from datetime import datetime
 from audio_utils import load_youtube_track, get_embedding_from_file, save_song, load_youtube_playlist,find_similar_songs
