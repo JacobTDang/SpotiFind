@@ -75,12 +75,12 @@ def upload():
             )
 
             save_song(track)
-
+            from audio_utils import EMBEDDING_DURATION
             # Save embedding
             song_embedding = SongEmbedding(
                 songID=track.songID,
                 audioStart=0.0,
-                audioDuration=duration,
+                audioDuration=min(duration, EMBEDDING_DURATION),
                 embedding=embedding.tolist(),
                 dimensions=512
             )
@@ -258,22 +258,35 @@ def search_audio():
 
         try:
             # Generate embedding from recording
-            embedding, duration = get_embedding_from_file(temp_path)
+            embedding, duration = get_embedding_from_file(temp_path, max_duration = 30)
+
+            logger.info(f"Generated embedding from {duration:.1f}s recording")
 
             # Find similar songs
-            similar_songs = find_similar_songs(embedding, limit=5)
+            closest_song = find_closest_song(embedding, distance_threshold=0.35)
 
-            if similar_songs:
+            if closest_song:
+                # Calculate confidence score (0-100%)
+                confidence = (1 - closest_song['distance']) * 100
+
+                logger.info(f"Found match: {closest_song['title']} with confidence {confidence:.1f}%")
+
                 return jsonify({
                     'success': True,
-                    'similar_songs': similar_songs,
-                    'recording_duration': duration
+                    'match_found': True,
+                    'song': closest_song,
+                    'confidence': round(confidence, 1),
+                    'recording_duration': duration,
+                    'message': f"Match found with {confidence:.1f}% confidence"
                 }), 200
             else:
+                logger.info("No close match found for recording")
                 return jsonify({
-                    'success': False,
-                    'message': 'No similar songs found',
-                    'similar_songs': []
+                    'success': True,
+                    'match_found': False,
+                    'message': 'No matching song found. Try recording a clearer or longer snippet.',
+                    'recording_duration': duration,
+                    'song': None
                 }), 200
 
         finally:

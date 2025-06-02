@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 BACKEND_TEMP_DIR = os.path.join(os.path.dirname(__file__), 'temp_audio')
 os.makedirs(BACKEND_TEMP_DIR, exist_ok=True)
 
+EMBEDDING_DURATION = 60
+
 def check_ffmpeg_available() -> bool:
     """Check if FFmpeg is available on the system."""
     try:
@@ -54,16 +56,50 @@ YDL_AUDIO_OPTS = {
         'preferredquality': '192',
     }],
 }
+YDL_PLAYLIST_OPTS = {
+    'quiet': True,
+    'extract_flat': 'in_playlist',  # Don't extract individual video info yet
+    'ignoreerrors': True,  # Continue on errors
+}
 
 def load_youtube_track(video_url: str) -> Dict:
     """Fetch metadata, save Song, download + embed, commit to DB."""
-
     temp_audio = None
 
     try:
         # Extract metadata
-        with yt.YoutubeDL(YDL_META_OPTS) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        try:
+            with yt.YoutubeDL(YDL_META_OPTS) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+        except yt.DownloadError as e:
+            error_msg = str(e)
+            logger.error(f"YouTube extraction error: {error_msg}")
+
+            # Provide specific error messages
+            if 'Video unavailable' in error_msg:
+                return {
+                    'success': False,
+                    'song': 'Unknown',
+                    'message': 'Video is unavailable (may be private, deleted, or region-locked)'
+                }
+            elif 'Private video' in error_msg:
+                return {
+                    'success': False,
+                    'song': 'Unknown',
+                    'message': 'This video is private'
+                }
+            elif 'age-restricted' in error_msg:
+                return {
+                    'success': False,
+                    'song': 'Unknown',
+                    'message': 'This video is age-restricted'
+                }
+            else:
+                return {
+                    'success': False,
+                    'song': 'Unknown',
+                    'message': f'Could not access video: {error_msg[:100]}'
+                }
 
         youtube_id = info['id']
         logger.info(f"Processing YouTube video: {info.get('title')} ({youtube_id})")
@@ -98,24 +134,49 @@ def load_youtube_track(video_url: str) -> Dict:
         # Save song to get ID
         save_song(yt_song)
 
-        # Download audio
-        temp_audio = download_youtube_audio(info)
+        # Download audio with retry logic
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                temp_audio = download_youtube_audio(info)
+                if temp_audio:
+                    break
+            except Exception as e:
+                logger.warning(f"Download attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    db.session.rollback()
+                    return {
+                        'success': False,
+                        'song': yt_song.title,
+                        'message': 'Audio download failed after retries'
+                    }
+                time.sleep(2)  # Wait before retry
+
         if not temp_audio:
             db.session.rollback()
             return {
                 'success': False,
                 'song': yt_song.title,
-                'message': 'Audio download failed'
+                'message': 'Audio download failed - no audio file created'
             }
 
         # Generate embedding
-        embedding, actual_duration = get_embedding_from_file(temp_audio)
+        try:
+            embedding, actual_duration = get_embedding_from_file(temp_audio)
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            db.session.rollback()
+            return {
+                'success': False,
+                'song': yt_song.title,
+                'message': f'Failed to generate audio embedding: {str(e)}'
+            }
 
         # Create embedding record
         song_emb = SongEmbedding(
             songID=yt_song.songID,
             audioStart=0.0,
-            audioDuration=min(actual_duration, 30.0),
+            audioDuration=min(actual_duration, EMBEDDING_DURATION),
             embedding=embedding.tolist(),
             dimensions=len(embedding),
         )
@@ -132,21 +193,15 @@ def load_youtube_track(video_url: str) -> Dict:
             'duration': actual_duration
         }
 
-    except yt.DownloadError as e:
-        db.session.rollback()
-        logger.error(f"YouTube download error: {e}")
-        return {
-            'success': False,
-            'song': info.get('title', 'Unknown') if 'info' in locals() else 'Unknown',
-            'message': f'Download error: {str(e)}'
-        }
     except Exception as e:
         db.session.rollback()
         logger.error(f"Unexpected error processing YouTube track: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {
             'success': False,
             'song': info.get('title', 'Unknown') if 'info' in locals() else 'Unknown',
-            'message': f'Processing error: {str(e)}'
+            'message': f'Processing error: {str(e)[:100]}'
         }
     finally:
         # Cleanup temporary file
@@ -191,7 +246,7 @@ def download_youtube_audio(info: dict) -> Optional[str]:
         logger.error(f"Error downloading audio: {e}")
         return None
 
-def get_embedding_from_file(path: str, max_duration: int = 30) -> tuple[np.ndarray, float]:
+def get_embedding_from_file(path: str, max_duration: int = 60) -> tuple[np.ndarray, float]:
     """Load audio file, generate OpenL3 embedding, return embedding and duration."""
     try:
         # Since we should have FFmpeg, let's convert problematic formats first
@@ -221,13 +276,18 @@ def get_embedding_from_file(path: str, max_duration: int = 30) -> tuple[np.ndarr
         else:
             analysis_duration = actual_duration
 
+        logger.info(f"Analyzing {analysis_duration:.1f} seconds of audio (actual duration: {actual_duration:.1f}s)")
+
+        hop_size = 0.5 if max_duration <= 30 else 0.25
+
         # Generate embedding using correct OpenL3 API
         embeddings, timestamps = openl3.get_audio_embedding(
             audio, sr,
             content_type='music',
             embedding_size=512,
-            hop_size=0.5
+            hop_size=hop_size
         )
+        logger.debug(f'Generated {len(embeddings)} time-step embeddings')
 
         # Average all time-step embeddings into single 512-dim vector
         embedding = np.mean(embeddings, axis=0)
@@ -311,43 +371,99 @@ def clean_title(title: str) -> str:
     return cleaned.strip()
 
 def load_youtube_playlist(playlist_url: str, max_videos: int = 50) -> List[Dict]:
-    """Process YouTube playlist, adding each video to database."""
+    """Process YouTube playlist with better error handling."""
+    results = []
+
     try:
-        with yt.YoutubeDL(YDL_META_OPTS) as ydl:
+        # First get playlist entries without extracting full info
+        with yt.YoutubeDL(YDL_PLAYLIST_OPTS) as ydl:
             playlist_info = ydl.extract_info(playlist_url, download=False)
 
+        if not playlist_info:
+            return [{
+                'success': False,
+                'message': 'Could not extract playlist information',
+                'song': 'Unknown'
+            }]
+
         entries = playlist_info.get('entries', [])
-        logger.info(f"Found {len(entries)} videos in playlist")
+        playlist_title = playlist_info.get('title', 'Unknown Playlist')
 
-        results = []
-        processed = 0
+        logger.info(f"Processing playlist: {playlist_title}")
+        logger.info(f"Found {len(entries)} entries in playlist")
 
-        for entry in entries[:max_videos]:
+        # Process each video individually
+        for idx, entry in enumerate(entries[:max_videos]):
             if not entry:
                 continue
 
-            video_url = entry.get('webpage_url')
-            if not video_url:
+            # Extract video ID and title from flat extraction
+            video_id = entry.get('id') or entry.get('url', '').split('v=')[-1].split('&')[0]
+            video_title = entry.get('title', f'Video {idx + 1}')
+
+            if not video_id or len(video_id) != 11:  # YouTube IDs are 11 chars
+                logger.warning(f"Invalid video ID for entry {idx}: {video_id}")
+                results.append({
+                    'success': False,
+                    'message': 'Invalid video ID',
+                    'song': video_title
+                })
                 continue
 
-            logger.info(f"Processing {processed + 1}/{min(len(entries), max_videos)}: {entry.get('title', 'Unknown')}")
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"Processing video {idx + 1}/{min(len(entries), max_videos)}: {video_title}")
 
-            result = load_youtube_track(video_url)
-            results.append(result)
-            processed += 1
+            try:
+                # Process individual video
+                result = load_youtube_track(video_url)
+                results.append(result)
 
-            # Log progress
-            status = "✓" if result['success'] else "✗"
-            print(f"{status} {result['message']}: {result['song']}")
+                # Small delay to avoid rate limiting
+                import time
+                time.sleep(1)
 
-        logger.info(f"Playlist processing complete. {sum(1 for r in results if r['success'])}/{len(results)} successful")
+            except Exception as e:
+                error_msg = str(e)
+
+                # Check for specific error types
+                if 'Video unavailable' in error_msg:
+                    message = 'Video is unavailable (private, deleted, or region-locked)'
+                elif 'Private video' in error_msg:
+                    message = 'Video is private'
+                elif 'age-restricted' in error_msg:
+                    message = 'Video is age-restricted'
+                else:
+                    message = f'Error: {error_msg[:100]}'
+
+                logger.warning(f"Failed to process {video_title}: {message}")
+                results.append({
+                    'success': False,
+                    'message': message,
+                    'song': video_title
+                })
+
+        # Summary
+        successful = sum(1 for r in results if r.get('success', False))
+        logger.info(f"Playlist processing complete: {successful}/{len(results)} successful")
+
+        if not results:
+            results.append({
+                'success': False,
+                'message': 'No videos could be processed from this playlist',
+                'song': 'None'
+            })
+
         return results
 
     except Exception as e:
-        logger.error(f"Error processing playlist: {e}")
-        return [{'success': False, 'message': f'Playlist error: {str(e)}', 'song': 'Unknown'}]
+        logger.error(f"Critical error processing playlist: {e}")
+        return [{
+            'success': False,
+            'message': f'Playlist processing failed: {str(e)}',
+            'song': 'Unknown'
+        }]
 
-def find_similar_songs(embedding: np.ndarray, limit: int = 5) -> List[Dict]:
+def find_similar_songs(embedding: np.ndarray,limit: int = 5,return_closest_only: bool = False,distance_threshold: float = 0.3) -> List[Dict]:
     """Find songs similar to given embedding using pgvector cosine similarity."""
     try:
         embedding_list = embedding.tolist()
@@ -356,31 +472,50 @@ def find_similar_songs(embedding: np.ndarray, limit: int = 5) -> List[Dict]:
         connection = db.engine.raw_connection()
         cursor = connection.cursor()
 
-        sql = """
-        SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
-               (se.embedding <-> %s::vector) as distance
-        FROM songs s
-        JOIN song_embeddings se ON s."songID" = se."songID"
-        ORDER BY se.embedding <-> %s::vector
-        LIMIT %s
-        """
+        # Get more results initially to ensure we have good matches
+        query_limit = 1 if return_closest_only else limit
 
-        cursor.execute(sql, (embedding_list, embedding_list, limit))
+        sql = """
+SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
+       (se.embedding <-> %s::vector) as distance
+FROM songs s
+JOIN song_embeddings se ON s."songID" = se."songID"
+ORDER BY se.embedding <-> %s::vector
+LIMIT %s
+"""
+        cursor.execute(sql, (embedding_list, embedding_list, query_limit))
         rows = cursor.fetchall()
 
         similar_songs = []
         for row in rows:
-            similar_songs.append({
+            distance = float(row[5])
+
+            # Skip if distance exceeds threshold (not similar enough)
+            if distance > distance_threshold:
+                logger.info(
+                    f"Skipping song '{row[1]}' - distance {distance:.3f} exceeds threshold {distance_threshold}"
+                )
+                continue
+
+            song_data = {
                 'songID': row[0],
                 'title': row[1],
                 'artist': row[2],
                 'source': row[3],
                 'youtube_id': row[4],
-                'distance': float(row[5])
-            })
+                'distance': distance,
+                'similarity': 1 - distance  # Convert distance to similarity score
+            }
+            similar_songs.append(song_data)
 
         cursor.close()
         connection.close()
+
+        # If we're looking for closest only and found nothing within threshold
+        if return_closest_only and not similar_songs:
+            logger.warning(
+                f"No songs found within distance threshold {distance_threshold}"
+            )
 
         return similar_songs
 
@@ -389,3 +524,11 @@ def find_similar_songs(embedding: np.ndarray, limit: int = 5) -> List[Dict]:
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return []
+
+
+def find_closest_song(embedding: np.ndarray):
+  '''
+  Finding one song that is close to matching the givin embedding
+  '''
+  results = find_similar_songs(embedding, limit=1, return_closest_only=True, distance_threshold=distance_threshold)
+  return results[0] if results else None
