@@ -4,8 +4,9 @@ import tempfile
 from models import Song, SongEmbedding
 from database import db
 import logging
+import soundfile as sf
 from datetime import datetime
-from audio_utils import load_youtube_track, get_embedding_from_file, save_song, load_youtube_playlist,find_similar_songs
+from audio_utils import adaptive_similarity_search,find_similar_songs_multi_segment,load_youtube_track, get_embedding_from_file, save_song, load_youtube_playlist,convert_audio_with_ffmpeg,get_multiple_embeddings,preprocess_audio
 from database import db
 
 bp = Blueprint('main', __name__)
@@ -238,9 +239,12 @@ def upload_playlist():
             'message': f'Playlist processing error: {str(e)}'
         }), 500
 
+
 @bp.route('/search-audio', methods=['POST'])
 def search_audio():
-    """Search for similar songs using audio recording"""
+    """
+    Enhanced audio search with preprocessing and multiple strategies.
+    """
     try:
         if 'audio' not in request.files:
             return jsonify({
@@ -250,56 +254,81 @@ def search_audio():
 
         audio_file = request.files['audio']
 
-        # Save temp file
+        # Save temporary file
         temp_dir = os.path.join(os.path.dirname(__file__), 'temp_uploads')
         os.makedirs(temp_dir, exist_ok=True)
-        temp_path = os.path.join(temp_dir, f"recording_{datetime.now().timestamp()}.webm")
+        temp_path = os.path.join(temp_dir, f"search_{datetime.now().timestamp()}.webm")
         audio_file.save(temp_path)
 
         try:
-            # Generate embedding from recording
-            embedding, duration = get_embedding_from_file(temp_path, max_duration = 30)
+            # Convert to WAV first
+            converted_path = convert_audio_with_ffmpeg(temp_path)
+            if not converted_path:
+                raise Exception("Failed to convert audio file")
 
-            logger.info(f"Generated embedding from {duration:.1f}s recording")
+            # Load and preprocess
+            audio, sr = sf.read(converted_path)
+            if len(audio.shape) > 1:
+                audio = np.mean(audio, axis=1)
 
-            # Find similar songs
-            closest_song = find_closest_song(embedding, distance_threshold=0.35)
+            audio, sr = preprocess_audio(audio, sr)
 
-            if closest_song:
-                # Calculate confidence score (0-100%)
-                confidence = (1 - closest_song['distance']) * 100
+            # Strategy 1: Single embedding from entire clip
+            full_embedding, duration = get_embedding_from_file(converted_path)
 
-                logger.info(f"Found match: {closest_song['title']} with confidence {confidence:.1f}%")
+            # Strategy 2: Multiple embeddings from segments
+            segment_embeddings = get_multiple_embeddings(audio, sr)
 
-                return jsonify({
-                    'success': True,
-                    'match_found': True,
-                    'song': closest_song,
-                    'confidence': round(confidence, 1),
-                    'recording_duration': duration,
-                    'message': f"Match found with {confidence:.1f}% confidence"
-                }), 200
+            # Combine strategies
+            if segment_embeddings:
+                # Use multi-segment approach
+                similar_songs = find_similar_songs_multi_segment(
+                    segment_embeddings + [full_embedding],
+                    limit=8
+                )
             else:
-                logger.info("No close match found for recording")
+                # Fall back to adaptive single embedding
+                similar_songs = adaptive_similarity_search(full_embedding, limit=8)
+
+            # Clean up temp files
+            for path in [temp_path, converted_path]:
+                if path and os.path.exists(path):
+                    os.remove(path)
+
+            if similar_songs:
+                logger.info(f"Found {len(similar_songs)} similar songs")
                 return jsonify({
                     'success': True,
-                    'match_found': False,
-                    'message': 'No matching song found. Try recording a clearer or longer snippet.',
-                    'recording_duration': duration,
-                    'song': None
-                }), 200
+                    'similar_songs': similar_songs,
+                    'search_duration': duration,
+                    'strategy_used': 'multi-segment' if segment_embeddings else 'single-embedding'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'No similar songs found. Try recording in a quieter environment or closer to the speaker.',
+                    'similar_songs': []
+                })
+
+        except Exception as e:
+            logger.error(f"Audio processing error: {e}")
+            return jsonify({
+                'success': False,
+                'message': f'Audio processing failed: {str(e)}'
+            }), 500
 
         finally:
             # Cleanup
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+            for path in [temp_path, converted_path if 'converted_path' in locals() else None]:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except:
+                        pass
 
     except Exception as e:
         logger.error(f"Search audio error: {e}")
         return jsonify({
             'success': False,
-            'message': f'Error processing audio: {str(e)}'
+            'message': f'Search failed: {str(e)}'
         }), 500
