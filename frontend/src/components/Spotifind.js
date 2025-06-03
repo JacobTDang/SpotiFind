@@ -8,7 +8,6 @@ import UploadTab from './UploadTab';
 import YouTubeTab from './YouTubeTab';
 import RecordingTab from './RecordingTab';
 import ResultsSection from './ResultsSection';
-import PlaylistTab from './PlaylistTab';
 
 const Spotifind = () => {
   const [activeTab, setActiveTab] = useState('upload');
@@ -24,8 +23,6 @@ const Spotifind = () => {
 
   // YouTube form state
   const [youtubeUrl, setYoutubeUrl] = useState('');
-
-  // 🔧 FIXED: Added missing playlist state
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [playlistResults, setPlaylistResults] = useState(null);
 
@@ -35,6 +32,8 @@ const Spotifind = () => {
   const [mediaRecorder, setMediaRecorder] = useState(null);
   const [audioBlob, setAudioBlob] = useState(null);
 
+  const [matchedSong, setMatchedSong] = useState(null);
+  const [confidence, setConfidence] = useState(0);
   // Refs for audio recording
   const recordingInterval = useRef(null);
   const audioChunks = useRef([]);
@@ -139,8 +138,6 @@ const Spotifind = () => {
       setIsLoading(false);
     }
   };
-
-  // 🔧 FIXED: Playlist handler with proper error handling
   const handlePlaylistAdd = async () => {
     if (!playlistUrl) {
       showMessage('Please enter a Youtube playlist URL', 'error');
@@ -253,38 +250,46 @@ const Spotifind = () => {
     setRecordingTime(0);
   };
 
-  const handleAudioSearch = async () => {
-    if (!audioBlob) {
-      showMessage('Please record audio first', 'error');
-      return;
-    }
+ const handleAudioSearch = async () => {
+  if (!audioBlob) {
+    showMessage('Please record audio first', 'error');
+    return;
+  }
 
-    setIsLoading(true);
-    const formData = new FormData();
-    formData.append('audio', audioBlob, 'recording.webm');
+  setIsLoading(true);
+  setMatchedSong(null); // Clear previous results
 
-    try {
-      const response = await fetch(`${FLASK_URL}/search-audio`, {
-        method: 'POST',
-        body: formData,
-      });
+  const formData = new FormData();
+  formData.append('audio', audioBlob, 'recording.webm');
 
-      const data = await response.json();
+  try {
+    const response = await fetch(`${FLASK_URL}/search-audio`, {
+      method: 'POST',
+      body: formData,
+    });
 
-      if (response.ok && data.similar_songs && data.similar_songs.length > 0) {
-        setResults(data.similar_songs);
-        showMessage(`Found ${data.similar_songs.length} similar songs`, 'success');
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      if (data.match_found) {
+        setMatchedSong(data.song);
+        setConfidence(data.confidence);
+        showMessage(data.message, 'success');
       } else {
-        setResults([]);
-        showMessage(data.message || 'No similar songs found', 'error');
+        setMatchedSong(false); // Indicates no match found
+        showMessage(data.message, 'info');
       }
-    } catch (error) {
-      showMessage('Network error during audio search', 'error');
-      setResults([]);
-    } finally {
-      setIsLoading(false);
+    } else {
+      setMatchedSong(false);
+      showMessage(data.message || 'Error during audio search', 'error');
     }
-  };
+  } catch (error) {
+    showMessage('Network error during audio search', 'error');
+    setMatchedSong(false);
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
@@ -311,7 +316,7 @@ const Spotifind = () => {
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-white mb-2 flex items-center justify-center gap-3">
             <Music className="w-10 h-10" />
-            Music Similarity Search
+            SpotiFind
           </h1>
           <p className="text-gray-300">Upload audio, add YouTube videos, and find similar songs using AI</p>
         </div>
@@ -339,10 +344,9 @@ const Spotifind = () => {
 
           {activeTab === 'youtube' && (
             <YouTubeTab
-              youtubeUrl={youtubeUrl}
               isLoading={isLoading}
-              setYoutubeUrl={setYoutubeUrl}
-              handleYouTubeAdd={handleYouTubeAdd}
+              setIsLoading={setIsLoading}
+              showMessage={showMessage}
             />
           )}
 
@@ -352,23 +356,13 @@ const Spotifind = () => {
               isRecording={isRecording}
               recordingTime={recordingTime}
               isLoading={isLoading}
+              matchedSong={matchedSong}
+              confidence={confidence}
               startRecording={startRecording}
               stopRecording={stopRecording}
               clearRecording={clearRecording}
               handleAudioSearch={handleAudioSearch}
-            />
-          )}
-
-          {/* 🔧 FIXED: Corrected typos and added proper props */}
-          {activeTab === 'playlist' && (
-            <PlaylistTab
-              isLoading={isLoading}
-              setIsLoading={setIsLoading}
-              showMessage={showMessage}
-              playlistUrl={playlistUrl}
-              setPlaylistUrl={setPlaylistUrl}
-              handlePlaylistAdd={handlePlaylistAdd}
-              playlistResults={playlistResults}
+              setMatchedSong={setMatchedSong}
             />
           )}
         </div>
