@@ -24,6 +24,18 @@ const RecordingTab = ({
       <h2 className="text-2xl font-bold text-white mb-6">Find Song by Recording</h2>
 
       <div className="space-y-6">
+        {/* Recording Tips */}
+        <div className="bg-blue-900/30 p-4 rounded-lg border border-blue-700">
+          <h3 className="text-blue-300 font-medium mb-2">For Best Results:</h3>
+          <ul className="text-blue-200 text-sm space-y-1">
+            <li>• Record close to speakers or headphones</li>
+            <li>• Minimize background noise</li>
+            <li>• Include vocals or prominent instruments</li>
+            <li>• Record the chorus or most recognizable part</li>
+            <li>• 5-10 seconds is usually enough</li>
+          </ul>
+        </div>
+
         <div className="text-center">
           <p className="text-gray-300 mb-6">
             Record a snippet of music to identify the song (like Shazam!)
@@ -132,6 +144,11 @@ const RecordingTab = ({
                       <p className="text-sm text-gray-400 mt-1">
                         Source: {matchedSong.source}
                       </p>
+                      {matchedSong.distance && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          Distance: {matchedSong.distance.toFixed(3)}
+                        </p>
+                      )}
                     </div>
                     {matchedSong.youtube_id && (
                       <a
@@ -147,10 +164,29 @@ const RecordingTab = ({
                   </div>
                 </div>
 
-                {confidence < 50 && (
-                  <p className="text-yellow-400 text-sm mt-4">
-                    Low confidence match. Try recording a clearer or different part of the song.
-                  </p>
+                {/* Confidence level messages */}
+                {confidence > 70 && (
+                  <div className="mt-4 p-3 bg-green-900/30 border border-green-700 rounded-lg">
+                    <p className="text-green-300 text-sm">
+                      High confidence match! This is very likely the correct song.
+                    </p>
+                  </div>
+                )}
+
+                {confidence > 50 && confidence <= 70 && (
+                  <div className="mt-4 p-3 bg-yellow-900/30 border border-yellow-700 rounded-lg">
+                    <p className="text-yellow-300 text-sm">
+                      Moderate confidence match. This might be the song you're looking for.
+                    </p>
+                  </div>
+                )}
+
+                {confidence <= 50 && (
+                  <div className="mt-4 p-3 bg-red-900/30 border border-red-700 rounded-lg">
+                    <p className="text-red-300 text-sm">
+                      Low confidence match. Try recording a clearer or different part of the song.
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
@@ -159,9 +195,22 @@ const RecordingTab = ({
           {/* No Match Message */}
           {matchedSong === false && (
             <div className="mt-8 bg-gray-700/50 rounded-xl p-6 border border-gray-600">
-              <p className="text-gray-300">
-                No matching song found. Try recording a different or clearer part of the song.
+              <div className="flex items-center justify-center gap-3 mb-3">
+                <Search className="w-8 h-8 text-gray-400" />
+                <h3 className="text-xl font-semibold text-gray-300">No Match Found</h3>
+              </div>
+              <p className="text-gray-300 mb-4">
+                No matching song found in our database.
               </p>
+              <div className="bg-blue-900/30 p-4 rounded-lg border border-blue-700">
+                <p className="text-blue-200 text-sm mb-2">Try these tips:</p>
+                <ul className="text-blue-200 text-sm space-y-1">
+                  <li>• Record a different part of the song (chorus works best)</li>
+                  <li>• Move closer to the audio source</li>
+                  <li>• Reduce background noise</li>
+                  <li>• Make sure the song is in our database</li>
+                </ul>
+              </div>
             </div>
           )}
         </div>
