@@ -1,3 +1,4 @@
+import numpy as np
 from flask import Flask, request, jsonify, Blueprint
 import os
 import tempfile
@@ -6,14 +7,28 @@ from database import db
 import logging
 import soundfile as sf
 from datetime import datetime
-from audio_utils import adaptive_similarity_search,find_similar_songs_multi_segment,load_youtube_track, get_embedding_from_file, save_song, load_youtube_playlist,convert_audio_with_ffmpeg,get_multiple_embeddings,preprocess_audio
-from database import db
+from typing import List, Dict
+import openl3
+from audio_utils import (
+    find_similar_songs,
+    adaptive_similarity_search,
+    load_youtube_track,
+    get_embedding_from_file,
+    save_song,
+    load_youtube_playlist,
+    convert_audio_with_ffmpeg,
+    get_multiple_embeddings,
+    preprocess_audio
+)
 
 bp = Blueprint('main', __name__)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Constants
+EMBEDDING_DURATION = 30  # seconds
 
 @bp.route('/')
 def index():
@@ -76,7 +91,7 @@ def upload():
             )
 
             save_song(track)
-            from audio_utils import EMBEDDING_DURATION
+
             # Save embedding
             song_embedding = SongEmbedding(
                 songID=track.songID,
@@ -239,12 +254,12 @@ def upload_playlist():
             'message': f'Playlist processing error: {str(e)}'
         }), 500
 
-
 @bp.route('/search-audio', methods=['POST'])
 def search_audio():
     """
-    Enhanced audio search with preprocessing and multiple strategies.
+    Basic audio search endpoint - processes uploaded audio and finds similar songs.
     """
+    converted_path = None
     try:
         if 'audio' not in request.files:
             return jsonify({
@@ -254,6 +269,14 @@ def search_audio():
 
         audio_file = request.files['audio']
 
+        if not audio_file or audio_file.filename == '':
+            return jsonify({
+                'success': False,
+                'message': 'No audio file selected'
+            }), 400
+
+        logger.info(f"Processing audio search - filename: {audio_file.filename}")
+
         # Save temporary file
         temp_dir = os.path.join(os.path.dirname(__file__), 'temp_uploads')
         os.makedirs(temp_dir, exist_ok=True)
@@ -261,74 +284,346 @@ def search_audio():
         audio_file.save(temp_path)
 
         try:
+            logger.info("Converting audio file...")
             # Convert to WAV first
             converted_path = convert_audio_with_ffmpeg(temp_path)
             if not converted_path:
                 raise Exception("Failed to convert audio file")
 
-            # Load and preprocess
-            audio, sr = sf.read(converted_path)
-            if len(audio.shape) > 1:
-                audio = np.mean(audio, axis=1)
+            logger.info("Generating embedding...")
+            # Generate embedding
+            embedding, duration = get_embedding_from_file(converted_path)
 
-            audio, sr = preprocess_audio(audio, sr)
+            logger.info(f"Searching for similar songs (duration: {duration}s)...")
+            # Find similar songs
+            similar_songs = find_similar_songs_adaptive(embedding, limit=10)
 
-            # Strategy 1: Single embedding from entire clip
-            full_embedding, duration = get_embedding_from_file(converted_path)
-
-            # Strategy 2: Multiple embeddings from segments
-            segment_embeddings = get_multiple_embeddings(audio, sr)
-
-            # Combine strategies
-            if segment_embeddings:
-                # Use multi-segment approach
-                similar_songs = find_similar_songs_multi_segment(
-                    segment_embeddings + [full_embedding],
-                    limit=8
-                )
-            else:
-                # Fall back to adaptive single embedding
-                similar_songs = adaptive_similarity_search(full_embedding, limit=8)
-
-            # Clean up temp files
-            for path in [temp_path, converted_path]:
-                if path and os.path.exists(path):
-                    os.remove(path)
+            logger.info(f"Found {len(similar_songs)} similar songs")
 
             if similar_songs:
-                logger.info(f"Found {len(similar_songs)} similar songs")
                 return jsonify({
                     'success': True,
                     'similar_songs': similar_songs,
                     'search_duration': duration,
-                    'strategy_used': 'multi-segment' if segment_embeddings else 'single-embedding'
+                    'analysis': {
+                        'segments_processed': 1,
+                        'strategy': 'single-embedding'
+                    }
                 })
             else:
                 return jsonify({
                     'success': False,
-                    'message': 'No similar songs found. Try recording in a quieter environment or closer to the speaker.',
+                    'message': 'No similar songs found. Try recording closer to the music source.',
                     'similar_songs': []
                 })
 
         except Exception as e:
             logger.error(f"Audio processing error: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return jsonify({
                 'success': False,
                 'message': f'Audio processing failed: {str(e)}'
             }), 500
 
         finally:
-            # Cleanup
-            for path in [temp_path, converted_path if 'converted_path' in locals() else None]:
+            # Cleanup temp files
+            for path in [temp_path, converted_path]:
                 if path and os.path.exists(path):
                     try:
                         os.remove(path)
-                    except:
-                        pass
+                        logger.debug(f"Cleaned up temp file: {path}")
+                    except Exception as cleanup_error:
+                        logger.warning(f"Failed to cleanup {path}: {cleanup_error}")
 
     except Exception as e:
         logger.error(f"Search audio error: {e}")
         return jsonify({
             'success': False,
             'message': f'Search failed: {str(e)}'
+        }), 500
+
+@bp.route('/debug-vectors')
+def debug_vectors():
+    """Debug route to check vector storage and distances."""
+    try:
+        from models import Song, SongEmbedding
+        import numpy as np
+
+        # Get a few songs with embeddings
+        songs_with_embeddings = db.session.query(Song, SongEmbedding).join(
+            SongEmbedding, Song.songID == SongEmbedding.songID
+        ).limit(3).all()
+
+        debug_info = []
+
+        for song, embedding in songs_with_embeddings:
+            vector = embedding.embedding
+
+            # Convert to numpy array to analyze
+            if isinstance(vector, list):
+                np_vector = np.array(vector)
+            else:
+                np_vector = np.array(vector)
+
+            info = {
+                'title': song.title,
+                'artist': song.artist,
+                'vector_type': str(type(vector)),
+                'vector_shape': str(np_vector.shape),
+                'vector_length': len(vector) if hasattr(vector, '__len__') else 'Unknown',
+                'first_5_values': vector[:5] if hasattr(vector, '__getitem__') else 'Cannot slice',
+                'magnitude': float(np.linalg.norm(np_vector)),
+                'min_value': float(np.min(np_vector)),
+                'max_value': float(np.max(np_vector)),
+                'mean_value': float(np.mean(np_vector))
+            }
+            debug_info.append(info)
+
+        # Test distance calculation manually
+        if len(songs_with_embeddings) >= 2:
+            vec1 = np.array(songs_with_embeddings[0][1].embedding)
+            vec2 = np.array(songs_with_embeddings[1][1].embedding)
+
+            # Calculate different distance metrics
+            cosine_dist = 1 - np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+            euclidean_dist = np.linalg.norm(vec1 - vec2)
+
+            distance_test = {
+                'song1': songs_with_embeddings[0][0].title,
+                'song2': songs_with_embeddings[1][0].title,
+                'cosine_distance': float(cosine_dist),
+                'euclidean_distance': float(euclidean_dist),
+                'expected_cosine_range': '0.0 to 2.0',
+                'expected_euclidean_range': 'varies widely'
+            }
+        else:
+            distance_test = {'error': 'Need at least 2 songs to test distances'}
+
+        return jsonify({
+            'debug_info': debug_info,
+            'distance_test': distance_test,
+            'recommendation': 'Cosine distances should be 0-2, very high values suggest normalization issues'
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
+    """
+    Normalize embedding to unit length for better cosine similarity.
+    """
+    norm = np.linalg.norm(embedding)
+    if norm == 0:
+        logger.warning("Zero norm embedding detected")
+        return embedding
+    return embedding / norm
+
+def find_similar_songs_adaptive(embedding: np.ndarray, limit: int = 5) -> List[Dict]:
+    """
+    Adaptive similarity search that works regardless of distance scale.
+    """
+    try:
+        # Ensure the query embedding is normalized
+        embedding = normalize_embedding(embedding)
+        embedding_list = embedding.tolist()
+
+        connection = db.engine.raw_connection()
+        cursor = connection.cursor()
+
+        # Get all results sorted by distance (no filtering)
+        sql = """
+        SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
+               (se.embedding <-> %s::vector) as distance
+        FROM songs s
+        JOIN song_embeddings se ON s."songID" = se."songID"
+        ORDER BY se.embedding <-> %s::vector
+        LIMIT %s
+        """
+
+        cursor.execute(sql, (embedding_list, embedding_list, limit))
+        rows = cursor.fetchall()
+
+        similar_songs = []
+        for i, row in enumerate(rows):
+            distance = float(row[5])
+
+            # Calculate a relative confidence based on ranking
+            # Best match gets highest confidence, others scaled down
+            if i == 0:
+                confidence = 85  # Give best match high confidence
+            else:
+                # Scale confidence based on distance ratio to best match
+                best_distance = float(rows[0][5])
+                if best_distance > 0:
+                    distance_ratio = distance / best_distance
+                    confidence = max(10, 85 / distance_ratio)  # Scale down based on ratio
+                else:
+                    confidence = 85 - (i * 10)  # Simple linear scaling
+
+            logger.info(f"Rank {i+1}: '{row[1]}' by {row[2]} - distance: {distance:.3f}, confidence: {confidence:.1f}%")
+
+            similar_songs.append({
+                'songID': row[0],
+                'title': row[1],
+                'artist': row[2],
+                'source': row[3],
+                'youtube_id': row[4],
+                'distance': distance,
+                'confidence': min(95, confidence)  # Cap at 95%
+            })
+
+        cursor.close()
+        connection.close()
+
+        return similar_songs
+
+    except Exception as e:
+        logger.error(f"Error finding similar songs: {e}")
+        return []
+
+@bp.route('/normalize-embeddings')
+def normalize_existing_embeddings():
+    """One-time fix to normalize all existing embeddings."""
+    try:
+        from models import SongEmbedding
+        import numpy as np
+
+        embeddings = SongEmbedding.query.all()
+        updated_count = 0
+
+        for emb in embeddings:
+            original_vector = np.array(emb.embedding)
+            original_norm = np.linalg.norm(original_vector)
+
+            if original_norm > 0 and abs(original_norm - 1.0) > 0.001:  # Only update if not already normalized
+                normalized_vector = original_vector / original_norm
+                emb.embedding = normalized_vector.tolist()
+                updated_count += 1
+
+                logger.info(f"Normalized embedding {emb.embeddingID}: norm {original_norm:.3f} -> 1.0")
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'Normalized {updated_count} embeddings',
+            'updated_count': updated_count
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)})
+@bp.route('/fix-embeddings', methods=['POST'])
+def fix_embeddings():
+    """
+    One-time endpoint to normalize all existing embeddings in the database.
+    This fixes the high distance issue.
+    """
+    try:
+        from audio_utils import normalize_embedding
+        import numpy as np
+
+        # Get all embeddings
+        embeddings = SongEmbedding.query.all()
+        updated_count = 0
+
+        logger.info(f"Found {len(embeddings)} embeddings to check")
+
+        for emb in embeddings:
+            try:
+                # Convert to numpy array
+                original_vector = np.array(emb.embedding)
+                original_norm = np.linalg.norm(original_vector)
+
+                # Check if normalization is needed
+                if abs(original_norm - 1.0) > 0.01:  # Not normalized
+                    # Normalize the vector
+                    normalized_vector = original_vector / original_norm
+
+                    # Verify normalization
+                    new_norm = np.linalg.norm(normalized_vector)
+
+                    # Update in database
+                    emb.embedding = normalized_vector.tolist()
+                    updated_count += 1
+
+                    logger.info(f"Normalized embedding {emb.embeddingID} for song {emb.songID}: "
+                               f"norm {original_norm:.3f} -> {new_norm:.3f}")
+                else:
+                    logger.debug(f"Embedding {emb.embeddingID} already normalized (norm: {original_norm:.3f})")
+
+            except Exception as e:
+                logger.error(f"Error processing embedding {emb.embeddingID}: {e}")
+                continue
+
+        # Commit all changes
+        if updated_count > 0:
+            db.session.commit()
+            logger.info(f"Successfully updated {updated_count} embeddings")
+
+        return jsonify({
+            'success': True,
+            'message': f'Normalized {updated_count} out of {len(embeddings)} embeddings',
+            'total_embeddings': len(embeddings),
+            'updated_count': updated_count
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error fixing embeddings: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }), 500
+
+@bp.route('/check-embedding-norms', methods=['GET'])
+def check_embedding_norms():
+    """
+    Debug endpoint to check the norms of embeddings in the database.
+    """
+    try:
+        import numpy as np
+
+        # Get a sample of embeddings
+        embeddings = SongEmbedding.query.limit(10).all()
+
+        norm_info = []
+        for emb in embeddings:
+            vector = np.array(emb.embedding)
+            norm = np.linalg.norm(vector)
+
+            # Get song info
+            song = Song.query.get(emb.songID)
+
+            norm_info.append({
+                'embeddingID': emb.embeddingID,
+                'songID': emb.songID,
+                'title': song.title if song else 'Unknown',
+                'artist': song.artist if song else 'Unknown',
+                'norm': float(norm),
+                'is_normalized': abs(norm - 1.0) < 0.01
+            })
+
+        # Calculate statistics
+        norms = [info['norm'] for info in norm_info]
+        stats = {
+            'min_norm': float(np.min(norms)),
+            'max_norm': float(np.max(norms)),
+            'mean_norm': float(np.mean(norms)),
+            'std_norm': float(np.std(norms))
+        }
+
+        return jsonify({
+            'success': True,
+            'embeddings': norm_info,
+            'statistics': stats,
+            'recommendation': 'Run /fix-embeddings if norms are not close to 1.0'
+        })
+
+    except Exception as e:
+        logger.error(f"Error checking norms: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Error: {str(e)}'
         }), 500
