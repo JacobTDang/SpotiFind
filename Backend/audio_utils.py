@@ -531,43 +531,55 @@ def find_closest_song(embedding: np.ndarray):
   return results[0] if results else None
 
 def preprocess_audio(audio, sr, target_sr=22050):
-  """
-  used to preprocess audio to accuracy and quality before embedding
-  """
+    """
+    Preprocess audio to improve quality before embedding generation.
+    Fixed to handle various sample rates properly.
+    """
+    try:
+        # Resample to consistent sample rate
+        if sr != target_sr:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
+            sr = target_sr
 
-  # resample if necessary
-  try:
-    if sr != target_sr:
-      audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
-      sr = target_sr
+        # Normalize amplitude to prevent clipping artifacts
+        audio = librosa.util.normalize(audio)
 
-    # normalize amplitude
-    audio = librosa.util.normalize(audio)
+        # Apply bandpass filter to focus on musical frequencies
+        # But only if sample rate allows it
+        nyquist = sr / 2
+        low_freq_hz = 80   # Hz
+        high_freq_hz = 8000 # Hz
 
-    # create bandpass filter using nyquist frequency.
-    # nyquist_freq = half my sample rate
-    nyquist_freq = sr / 2
-    high_freq = 80 / nyquist_freq
-    low_freq = 8000 / nyquist_freq
+        # Check if our desired frequencies are valid for this sample rate
+        if high_freq_hz < nyquist:
+            low_freq = low_freq_hz / nyquist
+            high_freq = high_freq_hz / nyquist
 
-    # apply butterworth filter
-    if high_freq < 1.0:
-      b, a = butter(4,[low_freq, high_freq], btype = 'band')
-      audio = filtfilt(b,a,audio)
+            # Additional validation
+            if 0 < low_freq < high_freq < 1.0:
+                b, a = butter(4, [low_freq, high_freq], btype='band')
+                audio = filtfilt(b, a, audio)
+                logger.debug(f"Applied bandpass filter: {low_freq_hz}-{high_freq_hz}Hz")
+            else:
+                logger.debug(f"Skipping bandpass filter - invalid frequency range for sr={sr}")
+        else:
+            logger.debug(f"Skipping bandpass filter - {high_freq_hz}Hz exceeds Nyquist frequency ({nyquist}Hz)")
 
-    # apply spectral gating to reduce noise that is quieter than 20 decibels
-    audio = librosa.effects.trim(audio,top_db=20)[0]
+        # Apply spectral gating to reduce noise
+        # This removes quiet sections that are likely noise
+        audio_trimmed = librosa.effects.trim(audio, top_db=20)
+        if len(audio_trimmed) > 0 and len(audio_trimmed[0]) > 0:
+            audio = audio_trimmed[0]
 
-    # reduce volume differences while making the audio more consistent without harsh distortion
-    # multiply by 1.5 increase amplitude, pushing louder audio into nonlinear part of tan func
-    # tan will compress audio valuse smoothly and dividing by 1.5 scales the output back
-    audio = np.tanh(audio * 1.5)/1.5
+        # Apply gentle compression to even out dynamics
+        audio = np.tanh(audio * 1.5) / 1.5
 
-    return audio, sr
+        logger.debug(f"Audio preprocessing successful for sr={sr}")
+        return audio, sr
 
-  except Exception as e:
-      logger.warning(f"Audio preprocessing failed: {e}")
-      return audio, sr  # Return original if preprocessing fails
+    except Exception as e:
+        logger.warning(f"Audio preprocessing failed: {e}")
+        return audio, sr  # Return original if preprocessing fails
 
 def get_multiple_embeddings(audio, sr, segment_duration =5.0, overlap = 2.0):
   """
