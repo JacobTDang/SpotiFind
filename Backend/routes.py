@@ -11,14 +11,11 @@ from typing import List, Dict
 import openl3
 from audio_utils import (
     find_similar_songs,
-    adaptive_similarity_search,
     load_youtube_track,
     get_embedding_from_file,
     save_song,
     load_youtube_playlist,
-    convert_audio_with_ffmpeg,
-    get_multiple_embeddings,
-    preprocess_audio
+    convert_audio_with_ffmpeg
 )
 
 bp = Blueprint('main', __name__)
@@ -296,7 +293,7 @@ def search_audio():
 
             logger.info(f"Searching for similar songs (duration: {duration}s)...")
             # Find similar songs
-            similar_songs = find_similar_songs_adaptive(embedding, limit=10)
+            similar_songs = find_similar_songs(embedding, limit=10)
 
             logger.info(f"Found {len(similar_songs)} similar songs")
 
@@ -627,3 +624,41 @@ def check_embedding_norms():
             'success': False,
             'message': f'Error: {str(e)}'
         }), 500
+
+@bp.route('/test-similarity/<int:song_id>', methods=['GET'])
+def test_similarity(song_id):
+    """Test similarity search for a specific song"""
+    try:
+        # Get the song and its embedding
+        song = Song.query.get(song_id)
+        if not song:
+            return jsonify({'error': 'Song not found'}), 404
+
+        embedding = SongEmbedding.query.filter_by(songID=song_id).first()
+        if not embedding:
+            return jsonify({'error': 'No embedding found for this song'}), 404
+
+        # Find similar songs (excluding itself)
+        similar = find_similar_songs(
+            np.array(embedding.embedding),
+            limit=10,
+            exclude_id=song_id
+        )
+
+        return jsonify({
+            'query_song': {
+                'id': song.songID,
+                'title': song.title,
+                'artist': song.artist
+            },
+            'similar_songs': similar,
+            'debug_info': {
+                'embedding_norm': float(np.linalg.norm(embedding.embedding)),
+                'embedding_mean': float(np.mean(embedding.embedding)),
+                'embedding_std': float(np.std(embedding.embedding))
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Error in test similarity: {e}")
+        return jsonify({'error': str(e)}), 500

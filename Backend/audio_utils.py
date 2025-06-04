@@ -1,102 +1,120 @@
 import os
-import tempfile
+import time
 import logging
 from typing import Dict, Optional, List, Tuple
 from dotenv import load_dotenv
-from models import Song, SongEmbedding, db
-import openl3
-import soundfile as sf
-import numpy as np
-import yt_dlp as yt
-import subprocess
-import librosa
 
-# Set up logging
+# Core dependencies
+from models import Song, SongEmbedding, db
+import numpy as np
+import soundfile as sf
+import subprocess
+
+# Audio processing
+import openl3
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    logging.warning("librosa not available - some features disabled")
+
+# YouTube downloading
+import yt_dlp as yt
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
-EMBEDDING_DURATION = 60  # Duration in seconds for embeddings
-SAMPLE_RATE = 22050     # Standard sample rate for audio processing
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-# Create backend temp directory if it doesn't exist
+EMBEDDING_DURATION = 30  # Duration in seconds for embeddings
+SAMPLE_RATE = 22050      # Standard sample rate for audio processing
+MAX_PLAYLIST_SIZE = 100  # Maximum playlist size to prevent abuse
+
+# Create backend temp directory
 BACKEND_TEMP_DIR = os.path.join(os.path.dirname(__file__), 'temp_audio')
 os.makedirs(BACKEND_TEMP_DIR, exist_ok=True)
 
+# Check FFmpeg availability
 def check_ffmpeg_available() -> bool:
     """Check if FFmpeg is available on the system."""
     try:
-        subprocess.run(['ffmpeg', '-version'],
-                      capture_output=True, check=True, timeout=5)
-        return True
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, timeout=5)
+        return result.returncode == 0
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
-# Check FFmpeg availability
 FFMPEG_AVAILABLE = check_ffmpeg_available()
-logger.info(f"FFmpeg available: {FFMPEG_AVAILABLE}")
+logger.info(f"FFmpeg available: {FFMPEG_AVAILABLE}, librosa: {LIBROSA_AVAILABLE}")
 
-# Configure yt_dlp to only fetch metadata (no download) when asked
+# =============================================================================
+# YT-DLP CONFIGURATION
+# =============================================================================
+
+# Metadata extraction for single videos
 YDL_META_OPTS = {
     'quiet': True,
     'skip_download': True,
     'extract_flat': False,
+    'no_warnings': True,
 }
 
-# Configure yt_dlp to always use FFmpeg for conversion since it's available
-YDL_AUDIO_OPTS = {
+# Playlist extraction - handles private/hidden videos gracefully
+YDL_PLAYLIST_OPTS = {
     'quiet': True,
-    'format': 'bestaudio/best',
-    'outtmpl': os.path.join(BACKEND_TEMP_DIR, '%(id)s.%(ext)s'),
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'wav',
-        'preferredquality': '192',
-    }],
+    'skip_download': True,
+    'extract_flat': True,     # Only get video IDs, not full metadata
+    'ignoreerrors': True,     # Skip unavailable/private videos
+    'no_warnings': True,
+    'playlistend': MAX_PLAYLIST_SIZE,
 }
+
+# Audio download configuration
+if FFMPEG_AVAILABLE:
+    YDL_AUDIO_OPTS = {
+        'quiet': True,
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
+        'outtmpl': os.path.join(BACKEND_TEMP_DIR, '%(id)s.%(ext)s'),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'ignoreerrors': False,
+    }
+else:
+    YDL_AUDIO_OPTS = {
+        'quiet': True,
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(BACKEND_TEMP_DIR, '%(id)s.%(ext)s'),
+        'ignoreerrors': False,
+    }
+
+# =============================================================================
+# CORE AUDIO PROCESSING
+# =============================================================================
 
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
-    """
-    Normalize embedding to unit length for proper cosine similarity.
-    This is CRITICAL for pgvector's distance calculations.
-    """
-    # Ensure it's a numpy array
+    """Normalize embedding to unit length for proper cosine similarity."""
     if not isinstance(embedding, np.ndarray):
         embedding = np.array(embedding)
 
-    # Calculate L2 norm
     norm = np.linalg.norm(embedding)
-
     if norm == 0:
         logger.warning("Zero norm embedding detected - returning random unit vector")
-        # Return a random unit vector instead of zero vector
         random_vec = np.random.randn(embedding.shape[0])
         return random_vec / np.linalg.norm(random_vec)
 
-    # Normalize to unit length
-    normalized = embedding / norm
-
-    # Verify normalization worked
-    final_norm = np.linalg.norm(normalized)
-    if abs(final_norm - 1.0) > 0.01:
-        logger.warning(f"Normalization may have failed. Final norm: {final_norm}")
-
-    return normalized
+    return embedding / norm
 
 def preprocess_audio(audio: np.ndarray, sr: int) -> Tuple[np.ndarray, int]:
-    """
-    Preprocess audio for better embedding quality.
-
-    Args:
-        audio: Audio signal array
-        sr: Sample rate
-
-    Returns:
-        Preprocessed audio and sample rate
-    """
+    """Preprocess audio for better embedding quality."""
     try:
         # Resample to standard rate if needed
-        if sr != SAMPLE_RATE:
+        if sr != SAMPLE_RATE and LIBROSA_AVAILABLE:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
             sr = SAMPLE_RATE
 
@@ -105,213 +123,233 @@ def preprocess_audio(audio: np.ndarray, sr: int) -> Tuple[np.ndarray, int]:
         if max_val > 0:
             audio = audio / max_val
 
-        # Remove silence at beginning and end
-        audio, _ = librosa.effects.trim(audio, top_db=20)
-
-        # Apply pre-emphasis filter to boost high frequencies
-        audio = librosa.effects.preemphasis(audio)
+        # Remove silence and apply pre-emphasis if librosa available
+        if LIBROSA_AVAILABLE:
+            audio, _ = librosa.effects.trim(audio, top_db=20)
+            audio = librosa.effects.preemphasis(audio)
 
         return audio, sr
     except Exception as e:
         logger.warning(f"Audio preprocessing failed: {e}")
         return audio, sr
 
-def verify_embedding_in_db(embedding_id: int):
-    """Debug function to verify an embedding is properly normalized in the database."""
-    try:
-        embedding_record = SongEmbedding.query.get(embedding_id)
-        if embedding_record:
-            vec = np.array(embedding_record.embedding)
-            norm = np.linalg.norm(vec)
-            logger.info(f"Embedding {embedding_id} norm: {norm:.6f} (should be ~1.0)")
-            return norm
-    except Exception as e:
-        logger.error(f"Error verifying embedding: {e}")
-    return None
-
-def get_embedding_from_file(path: str, max_duration: int = EMBEDDING_DURATION) -> Tuple[np.ndarray, float]:
-    """Load audio file, generate OpenL3 embedding, return NORMALIZED embedding and duration."""
-    try:
-        working_path = path
-
-        # If it's not a WAV file, convert it using FFmpeg
-        if not path.endswith('.wav') and FFMPEG_AVAILABLE:
-            converted_path = convert_audio_with_ffmpeg(path)
-            if converted_path and os.path.exists(converted_path):
-                working_path = converted_path
-                logger.debug(f"Using converted file: {working_path}")
-
-        # Load the audio file
-        audio, sr = sf.read(working_path)
-
-        # Handle stereo to mono conversion
-        if len(audio.shape) > 1:
-            audio = np.mean(audio, axis=1)
-
-        # Apply preprocessing
-        try:
-            audio, sr = preprocess_audio(audio, sr)
-        except Exception as e:
-            logger.warning(f"Preprocessing failed, using original audio: {e}")
-
-        # Get actual duration
-        actual_duration = len(audio) / sr
-
-        # Trim to max_duration seconds for consistent analysis
-        if actual_duration > max_duration:
-            audio = audio[:int(max_duration * sr)]
-            analysis_duration = max_duration
-        else:
-            analysis_duration = actual_duration
-
-        logger.info(f"Generating embedding for {analysis_duration:.1f}s of audio...")
-
-        # Generate embedding using correct OpenL3 API
-        embeddings, timestamps = openl3.get_audio_embedding(
-            audio, sr,
-            content_type='music',
-            embedding_size=512,
-            hop_size=0.5,
-            verbose=0  # Reduce TensorFlow verbosity
-        )
-
-        logger.info(f"Generated {len(embeddings)} time-step embeddings")
-
-        # Average all time-step embeddings into single 512-dim vector
-        embedding = np.mean(embeddings, axis=0)
-
-        # Log embedding stats before normalization
-        pre_norm = np.linalg.norm(embedding)
-        logger.info(f"Pre-normalization embedding norm: {pre_norm:.6f}")
-
-        # CRITICAL: Normalize the embedding for proper cosine similarity
-        embedding = normalize_embedding(embedding)
-
-        # Verify normalization
-        post_norm = np.linalg.norm(embedding)
-        logger.info(f"Post-normalization embedding norm: {post_norm:.6f}")
-
-        # Cleanup converted file if we created one
-        if working_path != path and os.path.exists(working_path):
-            os.remove(working_path)
-
-        return embedding, actual_duration
-
-    except Exception as e:
-        logger.error(f"Error generating embedding from {path}: {e}")
-        raise
-
-def get_multiple_embeddings(path: str, segment_duration: float = 10.0, overlap: float = 5.0) -> List[Tuple[np.ndarray, float, float]]:
-    """
-    Generate multiple embeddings from different segments of the audio.
-
-    Args:
-        path: Path to audio file
-        segment_duration: Duration of each segment in seconds
-        overlap: Overlap between segments in seconds
-
-    Returns:
-        List of (embedding, start_time, end_time) tuples
-    """
-    embeddings = []
-
-    try:
-        # Load audio
-        audio, sr = sf.read(path)
-
-        # Convert to mono
-        if len(audio.shape) > 1:
-            audio = np.mean(audio, axis=1)
-
-        # Apply preprocessing
-        audio, sr = preprocess_audio(audio, sr)
-
-        total_duration = len(audio) / sr
-        segment_samples = int(segment_duration * sr)
-        overlap_samples = int(overlap * sr)
-        step_samples = segment_samples - overlap_samples
-
-        # Generate embeddings for each segment
-        for start_sample in range(0, len(audio) - segment_samples + 1, step_samples):
-            end_sample = start_sample + segment_samples
-            segment = audio[start_sample:end_sample]
-
-            start_time = start_sample / sr
-            end_time = end_sample / sr
-
-            # Generate embedding for this segment
-            segment_embeddings, _ = openl3.get_audio_embedding(
-                segment, sr,
-                content_type='music',
-                embedding_size=512,
-                hop_size=0.5
-            )
-
-            # Average and normalize
-            embedding = np.mean(segment_embeddings, axis=0)
-            embedding = normalize_embedding(embedding)
-
-            embeddings.append((embedding, start_time, end_time))
-
-            logger.debug(f"Generated embedding for segment {start_time:.1f}s - {end_time:.1f}s")
-
-        return embeddings
-
-    except Exception as e:
-        logger.error(f"Error generating multiple embeddings: {e}")
-        return []
-
 def convert_audio_with_ffmpeg(input_path: str) -> Optional[str]:
     """Convert audio file to WAV using FFmpeg."""
+    if not FFMPEG_AVAILABLE:
+        return None
+
     try:
-        # Create output filename
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_path = os.path.join(BACKEND_TEMP_DIR, f"{base_name}_converted.wav")
 
         cmd = [
             'ffmpeg', '-i', input_path,
-            '-acodec', 'pcm_s16le',  # PCM 16-bit
-            '-ar', '22050',          # Sample rate compatible with OpenL3
-            '-ac', '1',              # Convert to mono
-            '-y',                    # Overwrite output
+            '-acodec', 'pcm_s16le',
+            '-ar', str(SAMPLE_RATE),
+            '-ac', '1',
+            '-y',
             output_path
         ]
-
-        logger.debug(f"Converting {input_path} with command: {' '.join(cmd)}")
 
         result = subprocess.run(cmd, capture_output=True, timeout=60)
 
         if result.returncode == 0 and os.path.exists(output_path):
-            logger.debug(f"Successfully converted to {output_path}")
             return output_path
         else:
-            error_msg = result.stderr.decode() if result.stderr else "Unknown error"
-            logger.error(f"FFmpeg conversion failed: {error_msg}")
+            logger.error("FFmpeg conversion failed")
             return None
 
-    except subprocess.TimeoutExpired:
-        logger.error("FFmpeg conversion timed out")
-        return None
     except Exception as e:
-        logger.error(f"Error converting audio with FFmpeg: {e}")
+        logger.error(f"Error converting audio: {e}")
         return None
+
+def get_embedding_from_file(path: str, max_duration: int = EMBEDDING_DURATION) -> Tuple[np.ndarray, float]:
+    """Generate high-quality OpenL3 embeddings from audio file."""
+    working_path = path
+    converted_file = None
+
+    try:
+        # Convert to WAV if needed
+        if not path.lower().endswith('.wav') and FFMPEG_AVAILABLE:
+            converted_file = convert_audio_with_ffmpeg(path)
+            if converted_file and os.path.exists(converted_file):
+                working_path = converted_file
+
+        # Load audio
+        try:
+            audio, sr = sf.read(working_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read audio file {working_path}: {e}")
+
+        # Convert to mono if stereo
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+
+        actual_duration = len(audio) / sr
+
+        # Select most distinctive part for longer tracks
+        if actual_duration > max_duration + 10:
+            start_offset = int(0.25 * actual_duration * sr)
+            audio = audio[start_offset : start_offset + int(max_duration * sr)]
+        elif actual_duration > max_duration:
+            start_offset = int((actual_duration - max_duration) * sr / 2)
+            audio = audio[start_offset : start_offset + int(max_duration * sr)]
+
+        # Preprocess audio
+        audio, sr = preprocess_audio(audio, sr)
+
+        # Generate OpenL3 embeddings
+        try:
+            embeddings, _ = openl3.get_audio_embedding(
+                audio, sr,
+                content_type='music',
+                embedding_size=512,
+                hop_size=0.1
+            )
+        except Exception as e:
+            raise RuntimeError(f"OpenL3 embedding generation failed: {e}")
+
+        if len(embeddings) == 0:
+            raise RuntimeError("No embedding frames generated by OpenL3")
+
+        # Sophisticated temporal aggregation
+        n_frames = len(embeddings)
+
+        # Weighted temporal emphasis
+        weights = np.ones(n_frames)
+        emphasis_size = max(1, int(0.2 * n_frames))
+        weights[:emphasis_size] *= 1.5
+        weights[-emphasis_size:] *= 1.5
+        weights = weights / weights.sum()
+
+        # Multiple aggregation strategies
+        weighted_mean = np.average(embeddings, axis=0, weights=weights)
+        max_pool = np.max(embeddings, axis=0)
+        std_pool = np.std(embeddings, axis=0)
+        percentile_75 = np.percentile(embeddings, 75, axis=0)
+        percentile_25 = np.percentile(embeddings, 25, axis=0)
+
+        # Combine aggregations
+        embedding = (
+            0.4 * weighted_mean +
+            0.2 * max_pool +
+            0.2 * percentile_75 +
+            0.1 * (percentile_75 - percentile_25) +
+            0.1 * std_pool
+        )
+
+        # Normalize to unit length
+        embedding = normalize_embedding(embedding)
+        return embedding, actual_duration
+
+    except Exception as e:
+        logger.error(f"Error generating embedding from {path}: {e}")
+        raise
+    finally:
+        # Cleanup converted file
+        if converted_file and converted_file != path and os.path.exists(converted_file):
+            try:
+                os.remove(converted_file)
+            except OSError as e:
+                logger.warning(f"Failed to cleanup converted file: {e}")
+
+# =============================================================================
+# DATABASE UTILITIES
+# =============================================================================
 
 def save_song(song: Song) -> None:
-    """Add song to session and flush to get songID."""
-    db.session.add(song)
-    db.session.flush()
+    """Add song to database session and flush to get songID."""
+    try:
+        db.session.add(song)
+        db.session.flush()
+        logger.debug(f"Song saved with ID: {song.songID}")
+    except Exception as e:
+        logger.error(f"Failed to save song to database: {e}")
+        raise
+
+# =============================================================================
+# YOUTUBE PROCESSING
+# =============================================================================
+
+def is_valid_audio_content(info: dict) -> bool:
+    """Check if YouTube video is suitable for audio analysis."""
+    # Skip live streams
+    if info.get('is_live', False) or info.get('live_status') == 'is_live':
+        return False
+
+    # Check duration
+    duration = info.get('duration')
+    if duration is None or duration < 10 or duration > 600:
+        return False
+
+    # Skip non-music categories
+    category = info.get('category', '').lower()
+    if category in ['news & politics', 'comedy', 'education', 'science & technology']:
+        return False
+
+    return True
+
+def clean_title(title: str) -> str:
+    """Clean up video title for better song identification."""
+    if not title:
+        return "Unknown Title"
+
+    cleaners = [
+        '(Official Video)', '(Official Music Video)', '(Official Audio)',
+        '(Lyric Video)', '(Lyrics)', '[Official Video]', '[Official Audio]',
+        '(HD)', '(4K)', '| Official Video', 'Official Video',
+        '(Music Video)', '[HD]', '[4K]'
+    ]
+
+    cleaned = title
+    for cleaner in cleaners:
+        cleaned = cleaned.replace(cleaner, '')
+
+    return cleaned.strip()
+
+def download_youtube_audio(info: dict) -> Optional[str]:
+    """Download audio from YouTube video and return temp file path."""
+    try:
+        video_id = info.get('id')
+        if not video_id:
+            return None
+
+        with yt.YoutubeDL(YDL_AUDIO_OPTS) as ydl:
+            ydl.extract_info(info['webpage_url'], download=True)
+
+        # Look for converted WAV file first
+        expected_wav = os.path.join(BACKEND_TEMP_DIR, f"{video_id}.wav")
+        if os.path.exists(expected_wav):
+            return expected_wav
+
+        # Find any file with the video ID
+        for filename in os.listdir(BACKEND_TEMP_DIR):
+            if filename.startswith(video_id):
+                return os.path.join(BACKEND_TEMP_DIR, filename)
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error downloading audio: {e}")
+        return None
 
 def load_youtube_track(video_url: str) -> Dict:
-    """Fetch metadata, save Song, download + embed, commit to DB."""
-    temp_audio = None
+    """Process a single YouTube video: fetch metadata, download, embed, and save."""
+    temp_audio: Optional[str] = None
+    info = {}
 
     try:
         # Extract metadata
         with yt.YoutubeDL(YDL_META_OPTS) as ydl:
             info = ydl.extract_info(video_url, download=False)
 
-        youtube_id = info['id']
-        logger.info(f"Processing YouTube video: {info.get('title')} ({youtube_id})")
+        youtube_id = info.get('id')
+        title = info.get('title', 'Unknown Title')
+
+        if not youtube_id:
+            return {'success': False, 'song': title, 'message': 'Could not extract video ID'}
+
+        logger.info(f"Processing: {title} ({youtube_id})")
 
         # Check if already exists
         existing = db.session.query(Song).filter_by(youtube_id=youtube_id).first()
@@ -323,41 +361,44 @@ def load_youtube_track(video_url: str) -> Dict:
                 'songID': existing.songID
             }
 
-        # Validate video (skip live streams, too long videos, etc.)
+        # Validate content
         if not is_valid_audio_content(info):
             return {
                 'success': False,
-                'song': info.get('title', 'Unknown'),
-                'message': 'Invalid content type (live stream, too long, etc.)'
+                'song': title,
+                'message': 'Invalid content (live stream, wrong duration, or non-music)'
             }
 
-        # Create Song instance
+        # Create Song record
         yt_song = Song(
-            title=clean_title(info.get('title', 'Unknown Title')),
-            artist=info.get('uploader', 'Unknown Artist'),
+            title=clean_title(title),
+            artist=info.get('uploader', 'Unknown Artist')[:255],
             source='youtube',
             youtube_id=youtube_id,
             preview_url=video_url,
         )
 
-        # Save song to get ID
         save_song(yt_song)
 
         # Download audio
         temp_audio = download_youtube_audio(info)
         if not temp_audio:
             db.session.rollback()
+            return {'success': False, 'song': yt_song.title, 'message': 'Audio download failed'}
+
+        # Generate embedding
+        try:
+            embedding, actual_duration = get_embedding_from_file(temp_audio)
+        except Exception as e:
+            db.session.rollback()
             return {
                 'success': False,
                 'song': yt_song.title,
-                'message': 'Audio download failed'
+                'message': f'Embedding generation failed: {str(e)}'
             }
 
-        # Generate embedding
-        embedding, actual_duration = get_embedding_from_file(temp_audio)
-
         # Create embedding record
-        song_emb = SongEmbedding(
+        song_embedding = SongEmbedding(
             songID=yt_song.songID,
             audioStart=0.0,
             audioDuration=min(actual_duration, EMBEDDING_DURATION),
@@ -365,8 +406,18 @@ def load_youtube_track(video_url: str) -> Dict:
             dimensions=len(embedding),
         )
 
-        db.session.add(song_emb)
-        db.session.commit()
+        db.session.add(song_embedding)
+
+        # Commit both song and embedding
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return {
+                'success': False,
+                'song': yt_song.title,
+                'message': f'Database save failed: {str(e)}'
+            }
 
         logger.info(f"Successfully added: {yt_song.title}")
         return {
@@ -379,18 +430,16 @@ def load_youtube_track(video_url: str) -> Dict:
 
     except yt.DownloadError as e:
         db.session.rollback()
-        logger.error(f"YouTube download error: {e}")
         return {
             'success': False,
-            'song': info.get('title', 'Unknown') if 'info' in locals() else 'Unknown',
+            'song': info.get('title', 'Unknown') if info else 'Unknown',
             'message': f'Download error: {str(e)}'
         }
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Unexpected error processing YouTube track: {e}")
         return {
             'success': False,
-            'song': info.get('title', 'Unknown') if 'info' in locals() else 'Unknown',
+            'song': info.get('title', 'Unknown') if info else 'Unknown',
             'message': f'Processing error: {str(e)}'
         }
     finally:
@@ -398,292 +447,216 @@ def load_youtube_track(video_url: str) -> Dict:
         if temp_audio and os.path.exists(temp_audio):
             try:
                 os.remove(temp_audio)
-                logger.debug(f"Cleaned up temp file: {temp_audio}")
             except OSError as e:
-                logger.warning(f"Failed to cleanup temp file {temp_audio}: {e}")
-
-def download_youtube_audio(info: dict) -> Optional[str]:
-    """Download audio from YouTube video info and return temp file path."""
-    try:
-        with yt.YoutubeDL(YDL_AUDIO_OPTS) as ydl:
-            result = ydl.extract_info(info['webpage_url'], download=True)
-
-        # Since we're using FFmpeg postprocessor, look for the converted file
-        video_id = result['id']
-
-        # FFmpeg should have converted to WAV
-        wav_path = os.path.join(BACKEND_TEMP_DIR, f"{video_id}.wav")
-        if os.path.exists(wav_path):
-            logger.debug(f"Downloaded and converted audio to: {wav_path}")
-            return wav_path
-
-        # Fallback: look for any file with this video ID
-        for filename in os.listdir(BACKEND_TEMP_DIR):
-            if filename.startswith(video_id):
-                path = os.path.join(BACKEND_TEMP_DIR, filename)
-                logger.debug(f"Found downloaded file: {path}")
-                return path
-
-        logger.error(f"Could not find downloaded file for video {video_id}")
-        return None
-
-    except Exception as e:
-        logger.error(f"Error downloading audio: {e}")
-        return None
-
-def is_valid_audio_content(info: dict) -> bool:
-    """Check if YouTube video is suitable for audio analysis."""
-    # Skip live streams
-    if info.get('is_live', False):
-        return False
-
-    # Skip very short videos (< 10 seconds)
-    duration = info.get('duration', 0)
-    if duration and duration < 10:
-        return False
-
-    # Skip very long videos (> 10 minutes) - likely not music
-    if duration and duration > 600:
-        return False
-
-    return True
-
-def clean_title(title: str) -> str:
-    """Clean up video title for better song matching."""
-    cleaners = [
-        '(Official Video)', '(Official Music Video)', '(Official Audio)',
-        '(Lyric Video)', '(Lyrics)', '[Official Video]', '[Official Audio]',
-        'HD', '4K', '| Official Video'
-    ]
-
-    cleaned = title
-    for cleaner in cleaners:
-        cleaned = cleaned.replace(cleaner, '')
-
-    return cleaned.strip()
+                logger.warning(f"Failed to cleanup temp file: {e}")
 
 def load_youtube_playlist(playlist_url: str, max_videos: int = 50) -> List[Dict]:
-    """Process YouTube playlist, adding each video to database."""
+    """
+    Process YouTube playlist with robust error handling for private/hidden videos.
+
+    Uses yt-dlp's extract_flat=True and ignoreerrors=True to gracefully skip
+    private, hidden, or deleted videos without failing.
+    """
+    results: List[Dict] = []
+
     try:
-        with yt.YoutubeDL(YDL_META_OPTS) as ydl:
+        # Extract playlist metadata with flat extraction
+        with yt.YoutubeDL(YDL_PLAYLIST_OPTS) as ydl:
             playlist_info = ydl.extract_info(playlist_url, download=False)
 
+        if not playlist_info:
+            return [{
+                'success': False,
+                'song': 'Unknown Playlist',
+                'message': 'Could not extract playlist information'
+            }]
+
         entries = playlist_info.get('entries', [])
-        logger.info(f"Found {len(entries)} videos in playlist")
+        total_entries = len(entries)
 
-        results = []
-        processed = 0
+        if total_entries == 0:
+            return [{
+                'success': False,
+                'song': 'Empty Playlist',
+                'message': 'No accessible videos found in playlist'
+            }]
 
-        for entry in entries[:max_videos]:
+        logger.info(f"Found {total_entries} accessible entries in playlist")
+
+        # Limit processing
+        max_videos = min(max_videos, MAX_PLAYLIST_SIZE, total_entries)
+        processed_count = 0
+        skipped_count = 0
+
+        for i, entry in enumerate(entries):
+            if processed_count >= max_videos:
+                break
+
+            # Skip None entries (private/deleted videos)
             if not entry:
+                skipped_count += 1
                 continue
 
-            video_url = entry.get('webpage_url')
-            if not video_url:
+            # Extract video ID or URL
+            video_id = entry.get('id')
+            video_url = entry.get('url')
+
+            if not video_id and not video_url:
+                skipped_count += 1
                 continue
 
-            logger.info(f"Processing {processed + 1}/{min(len(entries), max_videos)}: {entry.get('title', 'Unknown')}")
+            # Construct video URL if we only have ID
+            if video_id and not video_url:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-            result = load_youtube_track(video_url)
-            results.append(result)
-            processed += 1
+            processed_count += 1
+            logger.info(f"Processing playlist item {processed_count}/{max_videos}")
 
-            # Log progress
-            status = "✓" if result['success'] else "✗"
-            print(f"{status} {result['message']}: {result['song']}")
+            # Process individual video
+            try:
+                result = load_youtube_track(video_url)
+                results.append(result)
 
-        logger.info(f"Playlist processing complete. {sum(1 for r in results if r['success'])}/{len(results)} successful")
+                status = "✓" if result.get('success') else "✗"
+                logger.info(f"{status} {result.get('song', 'Unknown')}")
+
+            except Exception as e:
+                logger.error(f"Unexpected error processing video: {e}")
+                results.append({
+                    'success': False,
+                    'song': video_url,
+                    'message': f'Unexpected error: {str(e)}'
+                })
+
+        # Summary logging
+        successful = sum(1 for r in results if r.get('success', False))
+        logger.info(f"Playlist complete: {successful}/{len(results)} successful, {skipped_count} skipped")
+
         return results
 
     except Exception as e:
-        logger.error(f"Error processing playlist: {e}")
-        return [{'success': False, 'message': f'Playlist error: {str(e)}', 'song': 'Unknown'}]
+        logger.error(f"Playlist processing error: {e}")
+        return [{
+            'success': False,
+            'song': 'Playlist Error',
+            'message': f'Playlist processing error: {str(e)}'
+        }]
 
-def find_similar_songs(embedding: np.ndarray, limit: int = 5) -> List[Dict]:
+# =============================================================================
+# SIMILARITY SEARCH
+# =============================================================================
+
+def find_similar_songs(embedding: np.ndarray, limit: int = 5, exclude_id: Optional[int] = None) -> List[Dict]:
     """Find songs similar to given embedding using pgvector cosine similarity."""
     try:
-        # ENSURE the query embedding is normalized
-        query_embedding = normalize_embedding(embedding)
-        query_norm = np.linalg.norm(query_embedding)
-        logger.info(f"Query embedding norm: {query_norm:.6f}")
+        # Normalize the query embedding
+        normalized_embedding = normalize_embedding(embedding)
+        embedding_list = normalized_embedding.tolist()
 
-        embedding_list = query_embedding.tolist()
-
-        # Use raw connection approach with properly quoted column names
+        # Get raw database connection for pgvector queries
         connection = db.engine.raw_connection()
         cursor = connection.cursor()
 
-        # First, let's check if our embeddings in the DB are normalized
-        check_sql = """
-        SELECT COUNT(*), AVG(sqrt(sum(power(elem, 2)))) as avg_norm
-        FROM (
-            SELECT unnest(embedding::float[]) as elem, "songID"
-            FROM song_embeddings
-        ) t
-        GROUP BY "songID"
-        LIMIT 5
-        """
+        try:
+            if exclude_id:
+                sql = """
+                SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
+                       1 - (se.embedding <=> %s::vector) as similarity,
+                       (se.embedding <=> %s::vector) as distance
+                FROM songs s
+                JOIN song_embeddings se ON s."songID" = se."songID"
+                WHERE s."songID" != %s
+                ORDER BY se.embedding <=> %s::vector
+                LIMIT %s
+                """
+                cursor.execute(sql, (embedding_list, embedding_list, exclude_id, embedding_list, limit))
+            else:
+                sql = """
+                SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
+                       1 - (se.embedding <=> %s::vector) as similarity,
+                       (se.embedding <=> %s::vector) as distance
+                FROM songs s
+                JOIN song_embeddings se ON s."songID" = se."songID"
+                ORDER BY se.embedding <=> %s::vector
+                LIMIT %s
+                """
+                cursor.execute(sql, (embedding_list, embedding_list, embedding_list, limit))
 
-        cursor.execute(check_sql)
-        norm_check = cursor.fetchall()
-        if norm_check:
-            avg_norms = [row[1] for row in norm_check if row[1] is not None]
-            if avg_norms:
-                db_avg_norm = np.mean(avg_norms)
-                logger.info(f"Average norm of DB embeddings: {db_avg_norm:.6f}")
+            rows = cursor.fetchall()
 
-        sql = """
-        SELECT s."songID", s.title, s.artist, s.source, s.youtube_id,
-               (se.embedding <-> %s::vector) as distance,
-               sqrt(sum(power(unnest(se.embedding::float[]), 2))) as embedding_norm
-        FROM songs s
-        JOIN song_embeddings se ON s."songID" = se."songID"
-        GROUP BY s."songID", s.title, s.artist, s.source, s.youtube_id, se.embedding
-        ORDER BY se.embedding <-> %s::vector
-        LIMIT %s
-        """
+            similar_songs = []
+            for row in rows:
+                similar_songs.append({
+                    'songID': row[0],
+                    'title': row[1],
+                    'artist': row[2],
+                    'source': row[3],
+                    'youtube_id': row[4],
+                    'similarity': float(row[5]),
+                    'distance': float(row[6])
+                })
 
-        cursor.execute(sql, (embedding_list, embedding_list, limit))
-        rows = cursor.fetchall()
+            logger.info(f"Found {len(similar_songs)} similar songs")
+            return similar_songs
 
-        similar_songs = []
-        for i, row in enumerate(rows):
-            # Log the embedding norm for debugging
-            if len(row) > 6:
-                logger.debug(f"DB embedding norm for '{row[1]}': {row[6]:.6f}")
-
-            distance = float(row[5])
-
-            # For normalized vectors, cosine distance should be between 0 and 2
-            # 0 = identical, 1 = orthogonal, 2 = opposite
-            # Your distances of ~57 suggest vectors are not normalized
-
-            # Convert distance to similarity score (0-100%)
-            # For properly normalized vectors:
-            similarity = max(0, (2 - distance) / 2) * 100
-
-            similar_songs.append({
-                'songID': row[0],
-                'title': row[1],
-                'artist': row[2],
-                'source': row[3],
-                'youtube_id': row[4],
-                'distance': distance,
-                'similarity': round(similarity, 1)
-            })
-
-            logger.info(f"Rank {i+1}: '{row[1]}' - distance: {distance:.3f}, similarity: {similarity:.1f}%")
-
-        cursor.close()
-        connection.close()
-
-        return similar_songs
+        finally:
+            cursor.close()
+            connection.close()
 
     except Exception as e:
         logger.error(f"Error finding similar songs: {e}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
         return []
 
-def normalize_all_embeddings_in_db():
-    """One-time utility to normalize all existing embeddings in the database."""
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+def cleanup_temp_files() -> int:
+    """Clean up old temporary files."""
     try:
-        embeddings = SongEmbedding.query.all()
-        updated_count = 0
+        if not os.path.exists(BACKEND_TEMP_DIR):
+            return 0
 
-        for emb in embeddings:
-            original_vector = np.array(emb.embedding)
-            original_norm = np.linalg.norm(original_vector)
+        files_cleaned = 0
+        current_time = time.time()
 
-            # Only update if not already normalized
-            if abs(original_norm - 1.0) > 0.01:
-                normalized_vector = normalize_embedding(original_vector)
-                emb.embedding = normalized_vector.tolist()
-                updated_count += 1
+        for filename in os.listdir(BACKEND_TEMP_DIR):
+            file_path = os.path.join(BACKEND_TEMP_DIR, filename)
 
-                logger.info(f"Normalized embedding {emb.embeddingID}: {original_norm:.3f} -> 1.0")
+            if os.path.isfile(file_path):
+                file_age = current_time - os.path.getmtime(file_path)
+                if file_age > 3600:  # 1 hour
+                    try:
+                        os.remove(file_path)
+                        files_cleaned += 1
+                    except OSError:
+                        pass
 
-        db.session.commit()
-        logger.info(f"Successfully normalized {updated_count} embeddings")
-        return updated_count
+        if files_cleaned > 0:
+            logger.info(f"Cleaned up {files_cleaned} old temporary files")
+
+        return files_cleaned
 
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error normalizing embeddings: {e}")
+        logger.error(f"Error during temp file cleanup: {e}")
         return 0
-def adaptive_similarity_search(embedding: np.ndarray, limit: int = 10) -> List[Dict]:
-    """
-    Adaptive similarity search that adjusts confidence based on distance distribution.
-    """
+
+def get_database_stats() -> Dict:
+    """Get basic database statistics."""
     try:
-        # Ensure embedding is normalized
-        embedding = normalize_embedding(embedding)
+        total_songs = db.session.query(Song).count()
+        total_embeddings = db.session.query(SongEmbedding).count()
 
-        # Get similar songs
-        results = find_similar_songs(embedding, limit)
+        # Source distribution
+        source_counts = db.session.query(Song.source, db.func.count(Song.songID)).group_by(Song.source).all()
 
-        if not results:
-            return []
-
-        # Calculate confidence scores based on distance distribution
-        distances = [r['distance'] for r in results]
-        min_dist = min(distances)
-        max_dist = max(distances)
-
-        for i, result in enumerate(results):
-            distance = result['distance']
-
-            # Calculate confidence (inverse of normalized distance)
-            if max_dist - min_dist > 0:
-                normalized_dist = (distance - min_dist) / (max_dist - min_dist)
-                confidence = (1 - normalized_dist) * 85 + 10  # Scale to 10-95%
-            else:
-                # All distances are the same
-                confidence = 85
-
-            result['confidence'] = round(confidence, 1)
-
-            logger.debug(f"Song {i+1}: {result['title']} - distance: {distance:.3f}, confidence: {confidence:.1f}%")
-
-        return results
+        return {
+            'total_songs': total_songs,
+            'total_embeddings': total_embeddings,
+            'songs_by_source': dict(source_counts),
+            'embedding_coverage': f"{(total_embeddings/total_songs*100):.1f}%" if total_songs > 0 else "0%"
+        }
 
     except Exception as e:
-        logger.error(f"Error in adaptive similarity search: {e}")
-        return []
-
-def find_similar_songs_adaptive(embedding: np.ndarray, limit: int = 10) -> List[Dict]:
-    """
-    Adaptive similarity search with proper confidence calculation.
-    """
-    try:
-        # Get similar songs
-        results = find_similar_songs(embedding, limit)
-
-        if not results:
-            return []
-
-        # Since distances are very high (~57), let's use a different confidence calculation
-        distances = [r['distance'] for r in results]
-        min_dist = min(distances)
-        max_dist = max(distances)
-
-        logger.info(f"Distance range: {min_dist:.3f} - {max_dist:.3f}")
-
-        for i, result in enumerate(results):
-            distance = result['distance']
-
-            # For these high distances, use relative ranking
-            if i == 0:
-                confidence = 85.0  # Best match
-            else:
-                # Calculate relative confidence based on distance from best match
-                distance_ratio = (distance - min_dist) / (max_dist - min_dist) if max_dist > min_dist else 0
-                confidence = max(50, 85 - (distance_ratio * 35))
-
-            result['confidence'] = round(confidence, 1)
-
-        return results
-
-    except Exception as e:
-        logger.error(f"Error in adaptive similarity search: {e}")
-        return []
+        logger.error(f"Error getting database stats: {e}")
+        return {'error': str(e)}
