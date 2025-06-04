@@ -1,23 +1,29 @@
 import React, { useState } from 'react';
 import { Music, Loader2, CheckCircle, XCircle } from 'lucide-react';
 
+//  PROPER PROP DESTRUCTURING - Accept setIsLoading as a prop
 const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
+  //  LOCAL STATE for playlist-specific data
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [maxVideos, setMaxVideos] = useState(20);
   const [playlistResults, setPlaylistResults] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // ✅ ASYNC/AWAIT PATTERN with proper error handling
   const handlePlaylistAdd = async () => {
+    // Input validation
     if (!playlistUrl) {
       showMessage('Please enter a YouTube playlist URL', 'error');
       return;
     }
 
-    setIsLoading(true);
-    setIsProcessing(true);
-    setPlaylistResults(null);
+    //  STATE MANAGEMENT PATTERN - Set loading states
+    setIsLoading(true);        // ← Parent component loading state
+    setIsProcessing(true);     // ← Local component processing state
+    setPlaylistResults(null);  // ← Clear previous results
 
     try {
+      // FETCH API PATTERN with proper configuration
       const response = await fetch('http://localhost:5000/youtube-playlist', {
         method: 'POST',
         headers: {
@@ -29,21 +35,27 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
         }),
       });
 
+      //  RESPONSE HANDLING PATTERN
       const data = await response.json();
 
       if (data.success) {
+        //  SUCCESS STATE UPDATES
         setPlaylistResults(data);
         showMessage(
           `Playlist processed! ${data.successful_count}/${data.total_videos} songs added successfully`,
           'success'
         );
-        setPlaylistUrl('');
+        setPlaylistUrl(''); // Clear form on success
       } else {
+        //  ERROR HANDLING - Show server error message
         showMessage(data.message || 'Failed to process playlist', 'error');
       }
     } catch (error) {
+      //  NETWORK ERROR HANDLING
+      console.error('Playlist processing error:', error);
       showMessage('Network error during playlist processing', 'error');
     } finally {
+      // CLEANUP PATTERN - Always runs regardless of success/failure
       setIsLoading(false);
       setIsProcessing(false);
     }
@@ -54,6 +66,7 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
       <h2 className="text-2xl font-bold text-white mb-6">Add YouTube Playlist</h2>
 
       <div className="space-y-6">
+        {/*  CONTROLLED COMPONENT PATTERN */}
         <div>
           <label className="block text-gray-300 font-medium mb-2">Playlist URL</label>
           <input
@@ -67,12 +80,17 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
           <p className="text-sm text-gray-400 mt-1">Paste a YouTube playlist URL to process multiple videos at once</p>
         </div>
 
+        {/*  NUMBER INPUT WITH VALIDATION */}
         <div>
           <label className="block text-gray-300 font-medium mb-2">Max Videos to Process</label>
           <input
             type="number"
             value={maxVideos}
-            onChange={(e) => setMaxVideos(Math.max(1, Math.min(100, parseInt(e.target.value) || 20)))}
+            onChange={(e) => {
+              //  INPUT VALIDATION PATTERN - Clamp values
+              const value = Math.max(1, Math.min(100, parseInt(e.target.value) || 20));
+              setMaxVideos(value);
+            }}
             className="w-full p-3 rounded-lg bg-gray-700/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-white focus:border-transparent"
             min="1"
             max="100"
@@ -80,6 +98,7 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
           <p className="text-sm text-gray-400 mt-1">Limit: 1-100 videos (recommended: 20-50)</p>
         </div>
 
+        {/*  BUTTON STATE MANAGEMENT - Disabled during loading */}
         <button
           onClick={handlePlaylistAdd}
           disabled={isLoading}
@@ -98,7 +117,7 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
           )}
         </button>
 
-        {/* Processing Progress */}
+        {/*  CONDITIONAL RENDERING PATTERN - Processing indicator */}
         {isProcessing && (
           <div className="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
             <div className="flex items-center gap-3">
@@ -108,12 +127,12 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
           </div>
         )}
 
-        {/* Results Display */}
+        {/*  RESULTS DISPLAY with NULL CHECKING */}
         {playlistResults && (
           <div className="bg-gray-700/50 rounded-lg p-6 border border-gray-600">
             <h3 className="text-xl font-bold text-white mb-4">Playlist Results</h3>
 
-            {/* Summary */}
+            {/* Summary Grid */}
             <div className="grid grid-cols-2 gap-4 mb-6">
               <div className="bg-green-900/30 p-4 rounded-lg border border-green-700">
                 <div className="flex items-center gap-2">
@@ -132,10 +151,10 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
               </div>
             </div>
 
-            {/* Successful Songs */}
-            {playlistResults.successful_songs.length > 0 && (
+            {/*  ARRAY CHECKING PATTERN - Prevent errors on undefined arrays */}
+            {playlistResults.successful_songs?.length > 0 && (
               <div className="mb-4">
-                <h4 className="text-lg font-medium text-green-300 mb-2">✅ Successfully Added:</h4>
+                <h4 className="text-lg font-medium text-green-300 mb-2">Successfully Added:</h4>
                 <div className="max-h-40 overflow-y-auto space-y-2">
                   {playlistResults.successful_songs.map((song, index) => (
                     <div key={index} className="text-sm text-gray-300 bg-gray-800/50 p-2 rounded">
@@ -146,10 +165,9 @@ const PlaylistTab = ({ isLoading, setIsLoading, showMessage }) => {
               </div>
             )}
 
-            {/* Failed Songs */}
-            {playlistResults.failed_songs.length > 0 && (
+            {playlistResults.failed_songs?.length > 0 && (
               <div>
-                <h4 className="text-lg font-medium text-red-300 mb-2">❌ Failed to Process:</h4>
+                <h4 className="text-lg font-medium text-red-300 mb-2">Failed to Process:</h4>
                 <div className="max-h-40 overflow-y-auto space-y-2">
                   {playlistResults.failed_songs.map((song, index) => (
                     <div key={index} className="text-sm text-gray-300 bg-gray-800/50 p-2 rounded">

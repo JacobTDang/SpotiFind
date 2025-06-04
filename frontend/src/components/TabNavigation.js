@@ -16,6 +16,7 @@ const TabNavigation = ({ activeTab, setActiveTab }) => {
           <Upload className="w-4 h-4" />
           Upload Audio
         </button>
+
         <button
           onClick={() => setActiveTab('youtube')}
           className={`px-8 py-3 rounded-md font-medium transition-all duration-200 flex items-center gap-2 flex-1 justify-center ${
@@ -27,6 +28,7 @@ const TabNavigation = ({ activeTab, setActiveTab }) => {
           <Youtube className="w-4 h-4" />
           Add YouTube
         </button>
+
         <button
           onClick={() => setActiveTab('search')}
           className={`px-8 py-3 rounded-md font-medium transition-all duration-200 flex items-center gap-2 flex-1 justify-center ${

@@ -32,7 +32,8 @@ const RecordingTab = ({
             <li>• Minimize background noise</li>
             <li>• Include vocals or prominent instruments</li>
             <li>• Record the chorus or most recognizable part</li>
-            <li>• 5-10 seconds is usually enough</li>
+            <li>• 15-20 seconds gives best results</li>
+            <li>• Try different parts if first attempt fails</li>
           </ul>
         </div>
 
@@ -72,7 +73,7 @@ const RecordingTab = ({
                       Stop Recording
                     </button>
                     <p className="text-gray-400">
-                      Recording will auto-stop at 10 seconds
+                      Recording will auto-stop at 20 seconds
                     </p>
                   </div>
                 )}
@@ -147,6 +148,7 @@ const RecordingTab = ({
                       {matchedSong.distance && (
                         <p className="text-xs text-gray-500 mt-1">
                           Distance: {matchedSong.distance.toFixed(3)}
+                          {matchedSong.match_count && ` • Segments: ${matchedSong.embeddings_matched}/${matchedSong.match_count}`}
                         </p>
                       )}
                     </div>
@@ -168,7 +170,10 @@ const RecordingTab = ({
                 {confidence > 70 && (
                   <div className="mt-4 p-3 bg-green-900/30 border border-green-700 rounded-lg">
                     <p className="text-green-300 text-sm">
-                      High confidence match! This is very likely the correct song.
+                      <strong>High confidence match!</strong> This is very likely the correct song.
+                      {matchedSong.coverage && matchedSong.coverage > 0.7 && (
+                        <span className="block mt-1">Multiple segments matched consistently.</span>
+                      )}
                     </p>
                   </div>
                 )}
@@ -176,7 +181,10 @@ const RecordingTab = ({
                 {confidence > 50 && confidence <= 70 && (
                   <div className="mt-4 p-3 bg-yellow-900/30 border border-yellow-700 rounded-lg">
                     <p className="text-yellow-300 text-sm">
-                      Moderate confidence match. This might be the song you're looking for.
+                      <strong>Moderate confidence match.</strong> This might be the song you're looking for.
+                      {matchedSong.coverage && matchedSong.coverage < 0.5 && (
+                        <span className="block mt-1">Try recording a different part for better results.</span>
+                      )}
                     </p>
                   </div>
                 )}
@@ -184,8 +192,17 @@ const RecordingTab = ({
                 {confidence <= 50 && (
                   <div className="mt-4 p-3 bg-red-900/30 border border-red-700 rounded-lg">
                     <p className="text-red-300 text-sm">
-                      Low confidence match. Try recording a clearer or different part of the song.
+                      <strong>Low confidence match.</strong> This might not be the correct song.
                     </p>
+                    <div className="mt-2 text-red-200 text-xs">
+                      <p>Suggestions:</p>
+                      <ul className="list-disc list-inside mt-1 space-y-1">
+                        <li>Record a clearer or different part (chorus works best)</li>
+                        <li>Move closer to the audio source</li>
+                        <li>Record for the full 20 seconds</li>
+                        <li>Reduce background noise</li>
+                      </ul>
+                    </div>
                   </div>
                 )}
               </div>
@@ -203,12 +220,14 @@ const RecordingTab = ({
                 No matching song found in our database.
               </p>
               <div className="bg-blue-900/30 p-4 rounded-lg border border-blue-700">
-                <p className="text-blue-200 text-sm mb-2">Try these tips:</p>
+                <p className="text-blue-200 text-sm mb-2"><strong>Try these tips:</strong></p>
                 <ul className="text-blue-200 text-sm space-y-1">
                   <li>• Record a different part of the song (chorus works best)</li>
                   <li>• Move closer to the audio source</li>
-                  <li>• Reduce background noise</li>
-                  <li>• Make sure the song is in our database</li>
+                  <li>• Record for the full 20 seconds to capture more segments</li>
+                  <li>• Reduce background noise and echoes</li>
+                  <li>• Make sure the song is loud enough</li>
+                  <li>• Verify the song exists in our database</li>
                 </ul>
               </div>
             </div>
