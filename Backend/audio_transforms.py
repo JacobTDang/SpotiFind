@@ -1,5 +1,5 @@
 """
-Audio Transforms Module - Complete Implementation
+Audio Transforms Module
 
 This module handles all audio preprocessing and enhancement to improve
 similarity matching between different recording sources (studio vs microphone).
